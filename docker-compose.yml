@@ -27,17 +27,43 @@
 #     this on an internet-facing host.
 #
 services:
+  kanban-postgres:
+    image: postgres:16-alpine
+    container_name: hermes-kanban-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HERMES_KANBAN_POSTGRES_PORT:-55432}:5432"
+    environment:
+      - POSTGRES_DB=${HERMES_KANBAN_POSTGRES_DB:-hermes_kanban}
+      - POSTGRES_USER=${HERMES_KANBAN_POSTGRES_USER:-hermes_kanban}
+      - POSTGRES_PASSWORD=${HERMES_KANBAN_POSTGRES_PASSWORD:-hermes_kanban}
+    volumes:
+      - kanban-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   gateway:
     build: .
     image: hermes-agent
     container_name: hermes
     restart: unless-stopped
     network_mode: host
+    depends_on:
+      kanban-postgres:
+        condition: service_healthy
+    group_add:
+      - "986"
     volumes:
       - ~/.hermes:/opt/data
+      - ~/projects:/workspace/projects
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
+      - HERMES_KANBAN_POSTGRES_DSN=${HERMES_KANBAN_POSTGRES_DSN:-postgresql://hermes_kanban:hermes_kanban@127.0.0.1:55432/hermes_kanban}
       # To expose the OpenAI-compatible API server beyond localhost,
       # uncomment BOTH lines (API_SERVER_KEY is mandatory for auth):
       # - API_SERVER_HOST=0.0.0.0
@@ -67,10 +93,16 @@ services:
     network_mode: host
     depends_on:
       - gateway
+      - kanban-postgres
     volumes:
       - ~/.hermes:/opt/data
+      - ~/projects:/workspace/projects
     environment:
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
+      - HERMES_KANBAN_POSTGRES_DSN=${HERMES_KANBAN_POSTGRES_DSN:-postgresql://hermes_kanban:hermes_kanban@127.0.0.1:55432/hermes_kanban}
     # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
     command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+
+volumes:
+  kanban-postgres-data:

@@ -17,7 +17,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
 # hermes process, the dashboard, and per-profile gateways.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    build-essential curl nodejs npm python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli xz-utils && \
+    build-essential ca-certificates curl python3 ripgrep ffmpeg gcc python3-dev libffi-dev procps git openssh-client docker-cli tini xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- s6-overlay install ----------
@@ -66,6 +66,22 @@ RUN set -eu; \
     tar -C / -Jxpf /tmp/s6-overlay-arch.tar.xz; \
     tar -C / -Jxpf /tmp/s6-overlay-symlinks-noarch.tar.xz; \
     rm /tmp/s6-overlay-*.tar.xz /tmp/s6-overlay.sha256
+
+# Install the project/runtime Node version before any npm package install.
+# Some Judy/Hermes delegated projects require Node 24.x exactly, and Debian's
+# nodejs/npm packages lag behind that line. nvm is installed under /usr/local
+# so both build steps and the runtime hermes user see the same node/npm.
+ENV NVM_DIR=/usr/local/nvm
+ENV NODE_VERSION=24.15.0
+RUN mkdir -p "$NVM_DIR" && \
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | PROFILE=/dev/null bash && \
+    . "$NVM_DIR/nvm.sh" && \
+    nvm install "$NODE_VERSION" && \
+    nvm alias default "$NODE_VERSION" && \
+    nvm use default && \
+    npm install -g npm@latest @github/copilot && \
+    npm cache clean --force
+ENV PATH="$NVM_DIR/versions/node/v${NODE_VERSION}/bin:${PATH}"
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
 RUN useradd -u 10000 -m -d /opt/data hermes
@@ -188,13 +204,13 @@ COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-r
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
+<<<<<<< HEAD
 # Pre-s6 entrypoint.sh did `source .venv/bin/activate` which exported
 # the venv bin onto PATH; Architecture B's main-wrapper.sh does the
 # same for the container's main process, but `docker exec` and our
 # cont-init.d scripts don't pass through the wrapper. Expose the venv
 # bin globally so `docker exec <container> hermes ...` and any
-# subprocess that doesn't activate the venv first still find hermes.
-ENV PATH="/opt/hermes/.venv/bin:/opt/data/.local/bin:${PATH}"
+ENV PATH="/opt/hermes/.venv/bin:/opt/data/.local/bin:${NVM_DIR}/versions/node/v${NODE_VERSION}/bin:${PATH}"
 RUN mkdir -p /opt/data
 VOLUME [ "/opt/data" ]
 

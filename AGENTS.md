@@ -1017,6 +1017,15 @@ hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8
 on a 16+ core developer machine with API keys set diverges from CI in ways
 that have caused multiple "works locally, fails in CI" incidents (and the reverse).
 
+Do not ship code changes without running the relevant tests. If the local
+checkout is missing `pytest`, a virtualenv, or another required test tool,
+install the missing tooling in an isolated environment and run the tests rather
+than substituting `py_compile`, smoke tests, or manual inspection for pytest.
+
+Treat tests as design feedback, not just a final gate. When a test exposes a
+regression or ambiguity, adjust the implementation to preserve the intended
+behavior instead of weakening the test or relying on a narrower manual check.
+
 ```bash
 scripts/run_tests.sh                                  # full suite, CI-parity
 scripts/run_tests.sh tests/gateway/                   # one directory
