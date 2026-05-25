@@ -97,6 +97,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
+    identity_recent = ""
+    try:
+        from identity_continuity import build_prompt_blocks
+
+        identity_core, identity_recent = build_prompt_blocks()
+        if identity_core:
+            stable_parts.append(identity_core)
+    except Exception:
+        identity_recent = ""
+
+
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
@@ -273,6 +284,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
+
+    if identity_recent:
+        volatile_parts.append(identity_recent)
 
     if agent._memory_store:
         if agent._memory_enabled:
