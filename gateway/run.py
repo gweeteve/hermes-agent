@@ -9166,6 +9166,8 @@ class GatewayRunner:
                             "generated": _rebound.added,
                             "score": _rebound.score,
                             "dimensions": _rebound.dimensions or {},
+                            "weights": _rebound.weights or {},
+                            "weight_fallbacks": _rebound.weight_fallbacks or [],
                             "reason": _rebound.reason,
                         },
                         "finish_reason": _rebound.finish_reason,
