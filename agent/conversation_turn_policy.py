@@ -296,6 +296,36 @@ def _has_meaningful_social_signal(message_text: str) -> bool:
     return bool((tokens & affective) and (tokens & relational))
 
 
+def _has_coordination_update_signal(message_text: str) -> bool:
+    """Return whether a short ack is also a useful work-status update."""
+    tokens = _ascii_content_tokens(message_text)
+    completion_tokens = {
+        "cree",
+        "creee",
+        "done",
+        "execute",
+        "executee",
+        "fait",
+        "fini",
+        "termine",
+        "terminee",
+    }
+    work_context_tokens = {
+        "build",
+        "codex",
+        "commit",
+        "compose",
+        "docker",
+        "gateway",
+        "hermes",
+        "link",
+        "rebuild",
+        "restart",
+        "symlink",
+    }
+    return bool((tokens & completion_tokens) and (tokens & work_context_tokens))
+
+
 def _eligible_gateway(source: Any) -> bool:
     # This policy is only for Judy's Telegram social-turn handling.
     platform = getattr(getattr(source, "platform", None), "value", None) or str(
@@ -403,6 +433,7 @@ def should_suppress_conversation_turn(
         and decision.confidence >= SUPPRESS_CONFIDENCE_THRESHOLD
         and not _has_structural_request_signal(message_text)
         and not _has_meaningful_social_signal(message_text)
+        and not _has_coordination_update_signal(message_text)
     ):
         if _assistant_awaits_short_reply(recent_assistant_message):
             return SuppressionResult(False, decision, "assistant_question_pending")
