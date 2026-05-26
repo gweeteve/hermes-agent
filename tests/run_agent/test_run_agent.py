@@ -61,6 +61,7 @@ def agent():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch("run_agent.load_self_model_md", return_value=None),
     ):
         a = AIAgent(
             api_key="test-key-1234567890",
@@ -83,6 +84,7 @@ def agent_with_memory_tool():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch("run_agent.load_self_model_md", return_value=None),
     ):
         a = AIAgent(
             api_key="test-k...7890",
@@ -1051,6 +1053,7 @@ class TestBuildSystemPrompt:
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
             patch("run_agent.load_soul_md", return_value="SOUL IDENTITY"),
+            patch("run_agent.load_self_model_md", return_value=None),
         ):
             agent = AIAgent(
                 api_key="test-k...7890",
@@ -1064,6 +1067,51 @@ class TestBuildSystemPrompt:
 
         assert "SOUL IDENTITY" in prompt
         assert DEFAULT_AGENT_IDENTITY not in prompt
+
+    def test_self_model_identity_follows_soul_identity(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("terminal")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("run_agent.load_soul_md", return_value="SOUL IDENTITY"),
+            patch("run_agent.load_self_model_md", return_value="SELF MODEL BLOCK"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                load_soul_identity=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "SOUL IDENTITY" in prompt
+        assert "SELF MODEL BLOCK" in prompt
+        assert prompt.index("SOUL IDENTITY") < prompt.index("SELF MODEL BLOCK")
+        assert DEFAULT_AGENT_IDENTITY not in prompt
+
+    def test_self_model_identity_loads_with_default_identity_fallback(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("terminal")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("run_agent.load_soul_md", return_value=None),
+            patch("run_agent.load_self_model_md", return_value="SELF MODEL BLOCK"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                load_soul_identity=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert DEFAULT_AGENT_IDENTITY in prompt
+        assert "SELF MODEL BLOCK" in prompt
+        assert prompt.index(DEFAULT_AGENT_IDENTITY) < prompt.index("SELF MODEL BLOCK")
 
     def test_includes_system_message(self, agent):
         prompt = agent._build_system_prompt(system_message="Custom instruction")

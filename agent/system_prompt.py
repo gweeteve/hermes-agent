@@ -9,8 +9,8 @@ fork inherits the cached prompt verbatim.
 
 Three tiers are joined with ``\\n\\n``:
 
-* ``stable``   — identity (SOUL.md or DEFAULT_AGENT_IDENTITY), tool
-  guidance, computer-use guidance, nous subscription block, tool-use
+* ``stable``   — identity (SOUL.md or DEFAULT_AGENT_IDENTITY), SELF_MODEL.md,
+  tool guidance, computer-use guidance, nous subscription block, tool-use
   enforcement guidance + per-model operational guidance, skills prompt,
   alibaba model-name workaround, environment hints, platform hints.
 * ``context``  — caller-supplied ``system_message`` plus context files
@@ -45,7 +45,7 @@ from agent.prompt_builder import (
 def _ra():
     """Lazy reference to the ``run_agent`` module.
 
-    Helpers like ``load_soul_md``, ``build_environment_hints``,
+    Helpers like ``load_soul_md``, ``load_self_model_md``, ``build_environment_hints``,
     ``build_context_files_prompt``, ``build_nous_subscription_prompt``,
     ``build_skills_system_prompt`` and ``get_toolset_for_tool`` are
     imported into ``run_agent``'s namespace.  Many tests
@@ -96,6 +96,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if not _soul_loaded:
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
+
+    # SELF_MODEL.md is independent from SOUL.md and belongs in the stable
+    # identity tier, before operational/tool guidance.
+    _self_model_content = _r.load_self_model_md()
+    if _self_model_content:
+        stable_parts.append(_self_model_content)
 
     identity_recent = ""
     try:
