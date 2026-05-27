@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
-from hermes_time import format_utc_z, parse_utc_z, utc_now
+from hermes_time import parse_utc_z
 from hermes_constants import get_hermes_home
 from tools.registry import tool_error
 from hermes_cli.config import cfg_get
@@ -492,9 +492,9 @@ def _load_global_priority_tags() -> List[str]:
     return _normalize_retain_tags(hindsight_config.get("priority_tags"))
 
 
-def _utc_timestamp() -> str:
-    """Return current UTC timestamp in canonical UTC-Z format."""
-    return format_utc_z(utc_now())
+def _system_timestamp() -> str:
+    """Return current timestamp using the system local timezone."""
+    return datetime.now().isoformat(timespec="milliseconds")
 
 
 def _compact_text(value: Any) -> str:
@@ -2019,7 +2019,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
-        now = _utc_timestamp()
+        now = _system_timestamp()
         return [
             {
                 "role": "user",
@@ -2035,7 +2035,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _build_metadata(self, *, message_count: int, turn_index: int) -> Dict[str, str]:
         metadata: Dict[str, str] = {
-            "retained_at": _utc_timestamp(),
+            "retained_at": _system_timestamp(),
             "message_count": str(message_count),
             "turn_index": str(turn_index),
         }
@@ -2276,7 +2276,7 @@ class HindsightMemoryProvider(MemoryProvider):
             tags = _normalize_retain_tags(args.get("tags") or ["correction", "hygiene-memoire"])
             try:
                 candidates = self._find_invalidation_candidates(query, memory_id, document_id)
-                now = _utc_timestamp()
+                now = _system_timestamp()
                 for candidate in candidates:
                     self._append_memory_hygiene(
                         {
