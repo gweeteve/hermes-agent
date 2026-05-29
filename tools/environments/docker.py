@@ -6,6 +6,7 @@ persistence via bind mounts.
 """
 
 import logging
+import json
 import os
 import re
 import shutil
@@ -143,6 +144,36 @@ def find_docker() -> Optional[str]:
     return None
 
 
+def _docker_cli_env() -> dict[str, str]:
+    """Return environment for host-side docker CLI calls.
+
+    Hermes-in-Docker exposes the allowed Docker socket as JUDY_DOCKER_HOST and
+    terminal.docker_env may also define DOCKER_HOST.  The Docker backend's
+    preflight and lifecycle commands run in the gateway process, so they must
+    use the same socket instead of falling back to /var/run/docker.sock.
+    """
+    env = os.environ.copy()
+    if env.get("DOCKER_HOST"):
+        return env
+
+    terminal_env_raw = env.get("TERMINAL_DOCKER_ENV")
+    if terminal_env_raw:
+        try:
+            terminal_env = json.loads(terminal_env_raw)
+        except Exception:
+            terminal_env = {}
+        if isinstance(terminal_env, dict):
+            docker_host = terminal_env.get("DOCKER_HOST")
+            if isinstance(docker_host, str) and docker_host.strip():
+                env["DOCKER_HOST"] = docker_host.strip()
+                return env
+
+    judy_host = env.get("JUDY_DOCKER_HOST")
+    if judy_host:
+        env["DOCKER_HOST"] = judy_host
+    return env
+
+
 # Security flags applied to every container.
 # The container itself is the security boundary (isolated from host).
 # We drop all capabilities then add back the minimum needed:
@@ -232,6 +263,7 @@ def _ensure_docker_available() -> None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=_docker_cli_env(),
         )
     except FileNotFoundError:
         logger.error(
@@ -525,6 +557,7 @@ class DockerEnvironment(BaseEnvironment):
             text=True,
             timeout=120,  # image pull may take a while
             check=True,
+            env=_docker_cli_env(),
         )
         self._container_id = result.stdout.strip()
         logger.info(f"Started container {container_name} ({self._container_id[:12]})")
@@ -590,7 +623,7 @@ class DockerEnvironment(BaseEnvironment):
         else:
             cmd.extend(["bash", "-c", cmd_string])
 
-        return _popen_bash(cmd, stdin_data)
+        return _popen_bash(cmd, stdin_data, env=_docker_cli_env())
 
     @staticmethod
     def _storage_opt_supported() -> bool:
@@ -607,6 +640,7 @@ class DockerEnvironment(BaseEnvironment):
             result = subprocess.run(
                 [docker, "info", "--format", "{{.Driver}}"],
                 capture_output=True, text=True, timeout=10,
+                env=_docker_cli_env(),
             )
             driver = result.stdout.strip().lower()
             if driver != "overlay2":
@@ -617,13 +651,15 @@ class DockerEnvironment(BaseEnvironment):
             probe = subprocess.run(
                 [docker, "create", "--storage-opt", "size=1m", "hello-world"],
                 capture_output=True, text=True, timeout=15,
+                env=_docker_cli_env(),
             )
             if probe.returncode == 0:
                 # Clean up the created container
                 container_id = probe.stdout.strip()
                 if container_id:
                     subprocess.run([docker, "rm", container_id],
-                                   capture_output=True, timeout=5)
+                                   capture_output=True, timeout=5,
+                                   env=_docker_cli_env())
                 _storage_opt_ok = True
             else:
                 _storage_opt_ok = False
@@ -641,7 +677,7 @@ class DockerEnvironment(BaseEnvironment):
                     f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
                     f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
                 )
-                subprocess.Popen(stop_cmd, shell=True)
+                subprocess.Popen(stop_cmd, shell=True, env=_docker_cli_env())
             except Exception as e:
                 logger.warning("Failed to stop container %s: %s", self._container_id, e)
 
@@ -651,6 +687,7 @@ class DockerEnvironment(BaseEnvironment):
                     subprocess.Popen(
                         f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
                         shell=True,
+                        env=_docker_cli_env(),
                     )
                 except Exception:
                     pass
