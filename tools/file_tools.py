@@ -1185,6 +1185,20 @@ def _check_file_reqs():
     from tools import check_file_requirements
     return check_file_requirements()
 
+
+_READ_FILE_PATH_KEYS = ("path", "file_path", "filepath", "filename", "file", "absolute_path")
+
+
+def _extract_read_file_path(args: dict) -> tuple[str | None, str | None]:
+    """Return the requested read path and the argument key it came from."""
+    if not isinstance(args, dict):
+        return None, None
+    for key in _READ_FILE_PATH_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value, key
+    return None, None
+
 READ_FILE_SCHEMA = {
     "name": "read_file",
     "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or binary files — use vision_analyze for images.",
@@ -1290,7 +1304,17 @@ SEARCH_FILES_SCHEMA = {
 
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
+    path, path_key = _extract_read_file_path(args)
+    if not path:
+        keys = ", ".join(sorted(str(k) for k in args.keys())) if isinstance(args, dict) and args else "<none>"
+        return tool_error(
+            "read_file: missing required field 'path'. Re-emit the tool call "
+            "with {'path': '/absolute/or/relative/path'}. "
+            f"Received keys: {keys}."
+        )
+    if path_key != "path":
+        logger.debug("read_file accepted path alias %s", path_key)
+    return read_file_tool(path=path, offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
 
 
 def _handle_write_file(args, **kw):

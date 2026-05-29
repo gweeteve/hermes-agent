@@ -67,6 +67,29 @@ class TestReadFileHandler:
         assert "error" in result
         assert "terminal not available" in result["error"]
 
+    @patch("tools.file_tools.read_file_tool")
+    def test_handler_accepts_file_path_alias(self, mock_read):
+        """Provider/model variants sometimes emit file_path instead of path."""
+        mock_read.return_value = json.dumps({"content": "ok"})
+
+        from tools.file_tools import _handle_read_file
+        result = json.loads(_handle_read_file({"file_path": "/etc/hostname"}, task_id="t1"))
+        assert result["content"] == "ok"
+        mock_read.assert_called_once_with(
+            path="/etc/hostname", offset=1, limit=500, task_id="t1"
+        )
+
+    @patch("tools.file_tools.read_file_tool")
+    def test_handler_missing_path_returns_explicit_error(self, mock_read):
+        """Missing path must not fall through as an empty cwd-relative read."""
+        from tools.file_tools import _handle_read_file
+
+        result = json.loads(_handle_read_file({"offset": 1}, task_id="t1"))
+        assert "error" in result
+        assert "missing required field 'path'" in result["error"]
+        assert "Received keys: offset" in result["error"]
+        mock_read.assert_not_called()
+
 
 class TestWriteFileHandler:
     @patch("tools.file_tools._get_file_ops")
