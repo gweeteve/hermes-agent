@@ -220,6 +220,28 @@ def test_turn_policy_does_not_suppress_named_affective_ack(monkeypatch):
     assert result.reason == "dm_reply_by_default"
 
 
+def test_turn_policy_does_not_suppress_coordination_update(monkeypatch):
+    message = "voila c'est fait côté codex"
+    decision = _classify(
+        monkeypatch,
+        message_text=message,
+        payload={
+            "conversation_state": "terminal_ack",
+            "should_reply": False,
+            "confidence": 0.99,
+            "reason": "terminal ack",
+        },
+    )
+    result = should_suppress_conversation_turn(
+        decision=decision,
+        message_text=message,
+        source=_source(),
+    )
+
+    assert result.suppress is False
+    assert result.reason == "dm_reply_by_default"
+
+
 def test_turn_policy_does_not_suppress_dm_below_new_confidence_threshold(monkeypatch):
     decision = _classify(
         monkeypatch,

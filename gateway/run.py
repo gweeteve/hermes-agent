@@ -73,6 +73,16 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
+_CALENDAR_WAKEUP_INTERNAL_KIND = "calendar_wakeup"
+_DEFAULT_CALENDAR_WAKEUP_TOOLSETS = (
+    "web",
+    "vision",
+    "file",
+    "terminal",
+    "memory",
+    "calendar",
+    "session_search",
+)
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
@@ -1425,6 +1435,48 @@ def _check_unavailable_skill(command_name: str) -> str | None:
 def _platform_config_key(platform: "Platform") -> str:
     """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
     return "cli" if platform == Platform.LOCAL else platform.value
+
+
+def _is_calendar_wakeup_source(source: Any) -> bool:
+    """Return True for synthetic calendar wakeup sessions."""
+    return getattr(source, "internal_kind", None) == _CALENDAR_WAKEUP_INTERNAL_KIND
+
+
+def _calendar_wakeup_toolsets_from_config(user_config: dict | None) -> set[str]:
+    """Return the required calendar wakeup toolset overlay.
+
+    ``calendar.wakeup_toolsets`` is an operator override, but the calendar
+    toolset itself is always forced so wakeups can call ``calendar_done``.
+    """
+    cfg = user_config if isinstance(user_config, dict) else {}
+    calendar_cfg = cfg.get("calendar") if isinstance(cfg.get("calendar"), dict) else {}
+    configured = calendar_cfg.get("wakeup_toolsets") if isinstance(calendar_cfg, dict) else None
+    if isinstance(configured, list):
+        toolsets = {str(item).strip() for item in configured if str(item).strip()}
+    else:
+        toolsets = set(_DEFAULT_CALENDAR_WAKEUP_TOOLSETS)
+    toolsets.add("calendar")
+    return toolsets
+
+
+def _resolve_gateway_enabled_toolsets(
+    user_config: dict | None,
+    platform_key: str,
+    source: Any,
+) -> list[str]:
+    """Resolve enabled toolsets for a gateway run, including wakeup overlays."""
+    from hermes_cli.tools_config import _get_platform_tools
+
+    cfg = user_config if isinstance(user_config, dict) else {}
+    enabled = set(_get_platform_tools(cfg, platform_key))
+    if _is_calendar_wakeup_source(source):
+        overlay = _calendar_wakeup_toolsets_from_config(cfg)
+        enabled |= overlay
+        agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+        disabled = {str(ts) for ts in (agent_cfg.get("disabled_toolsets") or [])}
+        if disabled:
+            enabled -= disabled
+    return sorted(enabled)
 
 
 def _teams_pipeline_plugin_enabled() -> bool:
@@ -4564,9 +4616,119 @@ class GatewayRunner:
         # turn so the agent kicks off the new chat.
         asyncio.create_task(self._handoff_watcher())
 
+        # Start Judy calendar watcher — claims due voluntary appointments and
+        # wakes the agent through the configured home channel.
+        asyncio.create_task(self._calendar_wakeup_watcher())
+
         logger.info("Press Ctrl+C to stop")
         
         return True
+
+    def _calendar_wakeup_interval_seconds(self) -> int:
+        """Poll frequently during waking hours, slowly at night."""
+        hour = datetime.now().hour
+        if 7 <= hour < 23:
+            return 60
+        return 15 * 60
+
+    def _calendar_wakeup_prompt(self, event: Dict[str, Any]) -> str:
+        title = str(event.get("title") or "").strip()
+        description = str(event.get("description") or "").strip()
+        context = event.get("context") or {}
+        tags = event.get("tags") or []
+        event_id = event.get("id")
+        context_text = json.dumps(context, ensure_ascii=False, indent=2)
+        tags_text = ", ".join(str(t) for t in tags) if tags else "(aucun)"
+        return (
+            f"REVEIL PLANIFIE - {title}\n"
+            f"Event id: {event_id}\n"
+            f"Description: {description or '(aucune)'}\n"
+            f"Tags: {tags_text}\n"
+            f"Contexte JSON:\n{context_text}\n\n"
+            "Le contexte est un objet JSON libre. Exemples: priority, "
+            "depends_on, related_files, notes.\n"
+            "Fais ce que tu as a faire, puis marque l'evenement done avec "
+            f"calendar_done(id={event_id})."
+        )
+
+    def _calendar_home_source(self):
+        """Return the configured home source for calendar wakeups."""
+        from gateway.config import Platform
+        from gateway.session import SessionSource
+
+        candidates = [Platform.TELEGRAM] + [
+            p for p in self.adapters.keys() if p != Platform.TELEGRAM
+        ]
+        for platform in candidates:
+            adapter = self.adapters.get(platform)
+            if not adapter:
+                continue
+            home = self.config.get_home_channel(platform)
+            if not home or not home.chat_id:
+                continue
+            return adapter, SessionSource(
+                platform=platform,
+                chat_id=str(home.chat_id),
+                chat_name=home.name,
+                chat_type="dm",
+                user_id=str(home.chat_id),
+                user_name=home.name or "Calendar",
+                thread_id=str(home.thread_id) if home.thread_id else None,
+                internal_kind=_CALENDAR_WAKEUP_INTERNAL_KIND,
+            )
+        return None, None
+
+    async def _calendar_wakeup_watcher(self) -> None:
+        """Poll the Judy calendar and inject due wakeups into the Gateway."""
+        await asyncio.sleep(5)
+        while self._running:
+            interval = self._calendar_wakeup_interval_seconds()
+            try:
+                from hermes_cli import calendar_db
+
+                requeued = calendar_db.requeue_stale_firing()
+                if requeued:
+                    logger.info("Calendar wakeup requeued %d stale firing event(s)", requeued)
+                events = calendar_db.claim_due_events(limit=5)
+                for event in events:
+                    await self._dispatch_calendar_wakeup(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Calendar wakeup watcher tick error: %s", exc, exc_info=True)
+            await asyncio.sleep(interval)
+
+    async def _dispatch_calendar_wakeup(self, event: Dict[str, Any]) -> None:
+        from gateway.platforms.base import MessageEvent, MessageType
+        from hermes_cli import calendar_db
+
+        adapter, source = self._calendar_home_source()
+        event_id = event.get("id")
+        if not adapter or not source:
+            logger.warning("Calendar wakeup %s has no configured home channel", event_id)
+            if event_id is not None:
+                calendar_db.release_claim(int(event_id))
+            return
+        try:
+            synth_event = MessageEvent(
+                text=self._calendar_wakeup_prompt(event),
+                message_type=MessageType.TEXT,
+                source=source,
+                internal=True,
+            )
+            logger.info(
+                "Calendar wakeup %s dispatching to %s chat=%s thread=%s identity=%s",
+                event_id,
+                source.platform.value,
+                source.chat_id,
+                source.thread_id,
+                canonical_identity_key(source),
+            )
+            await adapter.handle_message(synth_event)
+        except Exception:
+            logger.exception("Calendar wakeup %s dispatch failed", event_id)
+            if event_id is not None:
+                calendar_db.release_claim(int(event_id))
 
     async def _handoff_watcher(self, interval: float = 2.0) -> None:
         """Background task that processes pending CLI→gateway session handoffs.
@@ -9166,6 +9328,8 @@ class GatewayRunner:
                             "generated": _rebound.added,
                             "score": _rebound.score,
                             "dimensions": _rebound.dimensions or {},
+                            "weights": _rebound.weights or {},
+                            "weight_fallbacks": _rebound.weight_fallbacks or [],
                             "reason": _rebound.reason,
                         },
                         "finish_reason": _rebound.finish_reason,
@@ -12187,8 +12351,11 @@ class GatewayRunner:
 
             platform_key = _platform_config_key(source.platform)
 
-            from hermes_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            enabled_toolsets = _resolve_gateway_enabled_toolsets(
+                user_config,
+                platform_key,
+                source,
+            )
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -16312,10 +16479,19 @@ class GatewayRunner:
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
-        from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        enabled_toolsets = _resolve_gateway_enabled_toolsets(
+            user_config,
+            platform_key,
+            source,
+        )
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+        if _is_calendar_wakeup_source(source):
+            logger.info(
+                "Calendar wakeup agent context identity=%s toolsets=%s",
+                canonical_identity_key(source),
+                enabled_toolsets,
+            )
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):

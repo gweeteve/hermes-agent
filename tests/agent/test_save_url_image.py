@@ -13,6 +13,8 @@ and the gateway 404'd at ``send_photo`` time.
 from __future__ import annotations
 
 import http.server
+import base64
+import stat
 import socketserver
 import threading
 
@@ -106,6 +108,18 @@ class TestSaveUrlImage:
         # relies on this being the canonical location.
         assert "cache/images" in str(path)
         assert path.suffix == ".png"
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+    def test_save_b64_image_writes_readable_cache_file(self, http_server):
+        from agent.image_gen_provider import save_b64_image
+
+        path = save_b64_image(base64.b64encode(PNG_1PX).decode("ascii"), prefix="codex_test")
+
+        assert path.exists()
+        assert path.read_bytes() == PNG_1PX
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
     def test_extension_inferred_from_content_type(self, http_server):
         base, _ = http_server

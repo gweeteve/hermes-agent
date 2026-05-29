@@ -51,6 +51,20 @@ class _FakeStream:
         return self._final
 
 
+class _RaisingAfterEventsStream(_FakeStream):
+    def __iter__(self):
+        yield from self._events
+        raise TypeError("'NoneType' object is not iterable")
+
+    def get_final_response(self):
+        raise TypeError("'NoneType' object is not iterable")
+
+
+class _MissingCompletedStream(_FakeStream):
+    def get_final_response(self):
+        raise RuntimeError("Didn't receive a response.completed event.")
+
+
 @pytest.fixture(autouse=True)
 def _tmp_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -213,6 +227,51 @@ class TestGenerate:
         fake_client = SimpleNamespace(
             responses=SimpleNamespace(
                 stream=lambda **kwargs: _FakeStream([partial_event], final_response)
+            )
+        )
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
+
+        result = provider.generate("a cat")
+        assert result["success"] is True
+        assert Path(result["image"]).exists()
+
+    def test_null_output_parse_error_after_partial_image_still_succeeds(self, provider, monkeypatch):
+        """ChatGPT/Codex may emit response.output=None at stream completion.
+
+        openai-python raises while parsing that terminal snapshot, but the
+        streamed partial image bytes are already sufficient to save the PNG.
+        """
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        partial_event = SimpleNamespace(
+            type="response.image_generation_call.partial_image",
+            partial_image_b64=_b64_png(),
+        )
+        final_response = SimpleNamespace(output=None, status="completed", output_text="")
+
+        fake_client = SimpleNamespace(
+            responses=SimpleNamespace(
+                stream=lambda **kwargs: _RaisingAfterEventsStream([partial_event], final_response)
+            )
+        )
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
+
+        result = provider.generate("a cat")
+        assert result["success"] is True
+        assert Path(result["image"]).exists()
+
+    def test_missing_completed_event_after_partial_image_still_succeeds(self, provider, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        partial_event = SimpleNamespace(
+            type="response.image_generation_call.partial_image",
+            partial_image_b64=_b64_png(),
+        )
+        final_response = SimpleNamespace(output=None, status="incomplete", output_text="")
+
+        fake_client = SimpleNamespace(
+            responses=SimpleNamespace(
+                stream=lambda **kwargs: _MissingCompletedStream([partial_event], final_response)
             )
         )
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)

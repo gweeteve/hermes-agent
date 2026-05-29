@@ -37,6 +37,13 @@ REBOUND_EXPANDED_THRESHOLD = 0.85
 REBOUND_WINDOW_SECONDS = 6 * 60 * 60
 REBOUND_WINDOW_LIMIT = 3
 GWENAEL_RELATIONAL_BASELINE = 0.82
+REBOUND_TRAIT_WEIGHTS = {
+    "momentum": ("rebond_momentum", 0.6),
+    "profondeur": ("rebond_profondeur", 0.5),
+    "nouveaute": ("rebond_nouveaute", 0.4),
+    "resonance": ("rebond_resonance", 0.5),
+    "elan": ("rebond_elan", 0.7),
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,8 @@ class ReboundResult:
     score: Optional[float] = None
     dimensions: Optional[Dict[str, float]] = None
     finish_reason: Optional[str] = None
+    weights: Optional[Dict[str, float]] = None
+    weight_fallbacks: Optional[List[str]] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,8 @@ class ReboundDecision:
     score: float
     dimensions: Dict[str, float]
     reason: str
+    weights: Optional[Dict[str, float]] = None
+    weight_fallbacks: Optional[List[str]] = None
 
 
 def _coerce_epoch(value: Any) -> Optional[float]:
@@ -285,6 +296,36 @@ def _has_meaningful_social_signal(message_text: str) -> bool:
     return bool((tokens & affective) and (tokens & relational))
 
 
+def _has_coordination_update_signal(message_text: str) -> bool:
+    """Return whether a short ack is also a useful work-status update."""
+    tokens = _ascii_content_tokens(message_text)
+    completion_tokens = {
+        "cree",
+        "creee",
+        "done",
+        "execute",
+        "executee",
+        "fait",
+        "fini",
+        "termine",
+        "terminee",
+    }
+    work_context_tokens = {
+        "build",
+        "codex",
+        "commit",
+        "compose",
+        "docker",
+        "gateway",
+        "hermes",
+        "link",
+        "rebuild",
+        "restart",
+        "symlink",
+    }
+    return bool((tokens & completion_tokens) and (tokens & work_context_tokens))
+
+
 def _eligible_gateway(source: Any) -> bool:
     # This policy is only for Judy's Telegram social-turn handling.
     platform = getattr(getattr(source, "platform", None), "value", None) or str(
@@ -392,6 +433,7 @@ def should_suppress_conversation_turn(
         and decision.confidence >= SUPPRESS_CONFIDENCE_THRESHOLD
         and not _has_structural_request_signal(message_text)
         and not _has_meaningful_social_signal(message_text)
+        and not _has_coordination_update_signal(message_text)
     ):
         if _assistant_awaits_short_reply(recent_assistant_message):
             return SuppressionResult(False, decision, "assistant_question_pending")
@@ -455,6 +497,50 @@ def _desire_weight(path: Path, name: str) -> float:
                 return 0.0
     return 0.0
 
+
+def _load_trait_items(path: Path) -> List[dict]:
+    traits_path = path.with_name("desire_traits.json")
+    try:
+        data = _read_json(traits_path if traits_path.exists() else path)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("traits", [])
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _rebound_trait_weights(path: Path) -> tuple[Dict[str, float], List[str]]:
+    traits = {str(item.get("name") or ""): item for item in _load_trait_items(path)}
+    weights: Dict[str, float] = {}
+    fallbacks: List[str] = []
+    for dimension, (trait_name, default_weight) in REBOUND_TRAIT_WEIGHTS.items():
+        item = traits.get(trait_name)
+        if item is None:
+            fallbacks.append(trait_name)
+            weights[dimension] = default_weight
+            continue
+        try:
+            weights[dimension] = max(0.0, min(1.0, float(item.get("weight"))))
+        except (TypeError, ValueError):
+            fallbacks.append(trait_name)
+            weights[dimension] = default_weight
+    if fallbacks:
+        logger.warning(
+            "missing or invalid rebound desire traits, using default weights: %s",
+            ", ".join(fallbacks),
+        )
+    return weights, fallbacks
+
+
+def _weighted_rebound_score(dimensions: Dict[str, float], weights: Dict[str, float]) -> float:
+    total_weight = sum(max(0.0, weight) for weight in weights.values())
+    if total_weight <= 0:
+        logger.warning("all rebound desire trait weights are zero, using unweighted score")
+        return round(sum(dimensions.values()) / len(dimensions), 4)
+    weighted = sum(_clamp_score(dimensions.get(name)) * max(0.0, weights.get(name, 0.0)) for name in dimensions)
+    return round(weighted / total_weight, 4)
 
 
 def _clamp_score(value: Any) -> float:
@@ -535,31 +621,41 @@ def _profondeur_echange(
         return 0.0, state
     combined = f"{message_text}\n{response}"
     tokens = _content_tokens(combined)
-    if tokens & {"intime", "vulnerable", "sens", "identite", "conscience", "mort", "amour", "peur"}:
-        return 0.9, "philosophical_or_intimate"
+    if tokens & {"intime", "vulnerable", "amour", "peur"}:
+        return 0.9, "intimate"
+    if tokens & {"sens", "identite", "conscience", "mort", "philosophie"}:
+        return 0.85, "philosophical"
     if (
         "```" in combined
         or tokens
         & {
             "debug",
+            "debugger",
             "docker",
             "traceback",
             "erreur",
             "pytest",
-            "gateway",
-            "runtime",
-            "implementation",
-            "fonction",
         }
     ):
-        return 0.6, "technical_or_debugging"
+        return 0.65, "debugging"
+    if tokens & {
+        "gateway",
+        "runtime",
+        "implementation",
+        "fonction",
+        "code",
+        "module",
+        "test",
+        "tests",
+    }:
+        return 0.6, "technical"
     if state == "active_request":
         return 0.3, "active_request_simple"
     if state == "other" and ("?" in message_text or len(message_text) > 80):
         return 0.3, "active_request_simple"
     if tokens & {"salut", "hello", "bonjour", "coucou"}:
-        return 0.15, "small_talk_or_greeting"
-    return 0.15, "small_talk_or_greeting"
+        return 0.12, "greeting"
+    return 0.15, "small_talk"
 
 
 def _read_jsonl_recent(path: Path, *, now: float, max_age_seconds: float) -> List[dict]:
@@ -698,12 +794,6 @@ def _rebound_decision(
     if ne_pas_deranger > 0.85:
         return ReboundDecision(False, 0.0, {}, "do_not_disturb")
 
-    last_assistant = _last_assistant_message(history)
-    if last_assistant and last_assistant.get("conversation_rebound"):
-        return ReboundDecision(False, 0.0, {}, "consecutive_cooldown")
-    if _has_recent_rebound(history, now=now):
-        return ReboundDecision(False, 0.0, {}, "window_cooldown")
-
     profondeur, _depth_reason = _profondeur_echange(
         state=state,
         message_text=message_text,
@@ -722,10 +812,16 @@ def _rebound_decision(
         ),
         "elan": _elan_relationnel(relationship_path, source=source),
     }
-    score = round(sum(dimensions.values()) / len(dimensions), 4)
+    weights, weight_fallbacks = _rebound_trait_weights(desires_path)
+    score = _weighted_rebound_score(dimensions, weights)
     if score < REBOUND_THRESHOLD:
-        return ReboundDecision(False, score, dimensions, "score_below_threshold")
-    return ReboundDecision(True, score, dimensions, "score_threshold")
+        return ReboundDecision(False, score, dimensions, "score_below_threshold", weights, weight_fallbacks)
+    last_assistant = _last_assistant_message(history)
+    if last_assistant and last_assistant.get("conversation_rebound"):
+        return ReboundDecision(False, score, dimensions, "consecutive_cooldown", weights, weight_fallbacks)
+    if _has_recent_rebound(history, now=now):
+        return ReboundDecision(False, score, dimensions, "window_cooldown", weights, weight_fallbacks)
+    return ReboundDecision(True, score, dimensions, "score_threshold", weights, weight_fallbacks)
 
 def maybe_add_conversation_rebound(
     *,
@@ -793,6 +889,8 @@ def maybe_add_conversation_rebound(
             reason=decision.reason,
             score=decision.score,
             dimensions=decision.dimensions,
+            weights=decision.weights,
+            weight_fallbacks=decision.weight_fallbacks,
         )
 
     sentence_limit = "2-3 sentences" if decision.score >= REBOUND_EXPANDED_THRESHOLD else "1-2 sentences"
@@ -856,6 +954,8 @@ def maybe_add_conversation_rebound(
             reason="rebound_model_failed",
             score=decision.score,
             dimensions=decision.dimensions,
+            weights=decision.weights,
+            weight_fallbacks=decision.weight_fallbacks,
         )
 
     if not rebound:
@@ -865,6 +965,8 @@ def maybe_add_conversation_rebound(
             reason="empty_rebound",
             score=decision.score,
             dimensions=decision.dimensions,
+            weights=decision.weights,
+            weight_fallbacks=decision.weight_fallbacks,
             finish_reason=finish_reason,
         )
     rebound = " ".join(rebound.split())[:500]
@@ -875,4 +977,6 @@ def maybe_add_conversation_rebound(
         score=decision.score,
         dimensions=decision.dimensions,
         finish_reason=finish_reason,
+        weights=decision.weights,
+        weight_fallbacks=decision.weight_fallbacks,
     )

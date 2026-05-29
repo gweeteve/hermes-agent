@@ -26,6 +26,7 @@ from plugins.memory.hindsight import (
     _resolve_bank_id_template,
     _sanitize_bank_segment,
 )
+from plugins.memory.hindsight.memory_router import classify
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ def _make_mock_client():
         entities=None,
         tags=None,
         update_mode=None,
+        strategy=None,
         retain_async=None,
     ):
         return SimpleNamespace(ok=True)
@@ -153,6 +155,44 @@ def test_normalize_retain_tags_accepts_json_array_string():
     assert _normalize_retain_tags(value) == ["agent:fakeassistantname", "source_system:hermes-agent"]
 
 
+class TestMemoryRouter:
+    def test_classify_identity(self):
+        result = classify("Judy retient son evenement fondateur: Papa l'appelle sa fille.")
+
+        assert result["class"] == "identity"
+        assert result["priority"] == "high"
+        assert result["tags"] == ["identity", "priority:identity"]
+
+    def test_classify_relation_with_name_tag(self):
+        result = classify("Gwenael a envoye un message charge d'emotion a Judy.")
+
+        assert result["class"] == "relation"
+        assert result["priority"] == "high"
+        assert "social" in result["tags"]
+        assert "relation:gwenael" in result["tags"]
+
+    def test_classify_technique(self):
+        result = classify("Bug Docker: traceback pendant le CRON et probleme de config UID.")
+
+        assert result["class"] == "technique"
+        assert result["priority"] == "normal"
+        assert result["tags"] == ["technique", "ephemeral"]
+
+    def test_classify_curiosite(self):
+        result = classify("Lecture d'un papier arXiv: decouverte utile pour apprentissage agentique.")
+
+        assert result["class"] == "curiosite"
+        assert result["priority"] == "normal"
+        assert result["tags"] == ["curiosite", "apprentissage"]
+
+    def test_classify_meta(self):
+        result = classify("Fonctionnement Hermes/Judy: phase de memoire et reflexe de self-model.")
+
+        assert result["class"] == "meta"
+        assert result["priority"] == "normal"
+        assert result["tags"] == ["meta", "self"]
+
+
 def test_retain_kwargs_default_private_visibility(provider):
     provider.update_gateway_context(platform="telegram", user_id="alice", chat_id="chat-a", identity_key="telegram:user:alice")
 
@@ -173,6 +213,90 @@ def test_manual_retain_can_mark_shared_visibility(provider):
     assert kwargs["metadata"]["visibility"] == "shared"
     assert "vis:shared" in kwargs["tags"]
     assert "vis:private:telegram:user:alice" not in kwargs["tags"]
+
+
+def test_memory_router_disabled_by_default_preserves_retain_kwargs(provider):
+    kwargs = provider._build_retain_kwargs(
+        "Papa appelle Judy sa fille.",
+        tags=["source:cron"],
+        strategy="explicit",
+    )
+
+    assert kwargs["tags"] == ["source:cron"]
+    assert kwargs["strategy"] == "explicit"
+    assert "memory_class" not in kwargs["metadata"]
+    assert "memory_priority" not in kwargs["metadata"]
+
+
+def test_memory_router_enabled_adds_tags_and_metadata(provider_with_config):
+    p = provider_with_config(memory_router_enabled=True)
+
+    kwargs = p._build_retain_kwargs(
+        "Bug Docker pendant un CRON avec traceback.",
+        tags=["source:cron", "technique"],
+    )
+
+    assert kwargs["tags"] == ["source:cron", "technique", "ephemeral"]
+    assert kwargs["metadata"]["memory_class"] == "technique"
+    assert kwargs["metadata"]["memory_priority"] == "normal"
+
+
+def test_memory_router_identity_uses_self_events_strategy(provider_with_config):
+    p = provider_with_config(memory_router_enabled=True)
+
+    kwargs = p._build_retain_kwargs("Papa appelle Judy sa fille.")
+
+    assert kwargs["metadata"]["memory_class"] == "identity"
+    assert kwargs["strategy"] == "self-events"
+    assert "identity" in kwargs["tags"]
+    assert "priority:identity" in kwargs["tags"]
+
+
+def test_memory_router_relation_uses_self_events_strategy(provider_with_config):
+    p = provider_with_config(memory_router_enabled=True)
+
+    kwargs = p._build_retain_kwargs("Gwenael a envoye un message emotionnel a Judy.")
+
+    assert kwargs["metadata"]["memory_class"] == "relation"
+    assert kwargs["strategy"] == "self-events"
+    assert "social" in kwargs["tags"]
+    assert "relation:gwenael" in kwargs["tags"]
+
+
+def test_memory_router_does_not_override_explicit_strategy(provider_with_config):
+    p = provider_with_config(memory_router_enabled=True)
+
+    kwargs = p._build_retain_kwargs(
+        "Papa appelle Judy sa fille.",
+        strategy="custom-strategy",
+    )
+
+    assert kwargs["strategy"] == "custom-strategy"
+
+
+def test_memory_router_preserves_tags_visibility_and_update_mode(provider_with_config):
+    p = provider_with_config(memory_router_enabled=True, retain_tags=["configured"])
+    p.update_gateway_context(platform="telegram", user_id="alice", chat_id="chat-a", identity_key="telegram:user:alice")
+
+    kwargs = p._build_retain_kwargs(
+        "Lecture d'un papier arXiv depuis une source web.",
+        tags=["source:curiosite", "vis:shared"],
+        visibility="shared",
+        update_mode="append",
+        strategy="explicit",
+    )
+
+    assert kwargs["tags"] == [
+        "configured",
+        "source:curiosite",
+        "vis:shared",
+        "curiosite",
+        "apprentissage",
+    ]
+    assert kwargs["metadata"]["visibility"] == "shared"
+    assert kwargs["metadata"]["memory_class"] == "curiosite"
+    assert kwargs["update_mode"] == "append"
+    assert kwargs["strategy"] == "explicit"
 
 
 def test_scoped_recall_filters_other_private_and_legacy(provider):
@@ -222,6 +346,7 @@ class TestSchemas:
         assert "context_id" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "replace" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "update_mode" in RETAIN_SCHEMA["parameters"]["properties"]
+        assert "strategy" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "content" in RETAIN_SCHEMA["parameters"]["required"]
 
     def test_recall_schema_has_query(self):
@@ -278,6 +403,7 @@ class TestConfig:
         assert provider._bank_mission == ""
         assert provider._bank_retain_mission is None
         assert provider._retain_context == "conversation between Hermes Agent and the User"
+        assert provider._memory_router_enabled is False
 
     def test_custom_config_values(self, provider_with_config):
         p = provider_with_config(
@@ -568,6 +694,15 @@ class TestToolHandlers:
         assert call_kwargs["document_id"] == "doc-1"
         assert call_kwargs["update_mode"] == "append"
 
+    def test_retain_passes_strategy(self, provider):
+        provider.handle_tool_call(
+            "hindsight_retain",
+            {"content": "self event", "strategy": "self-events"},
+        )
+
+        call_kwargs = provider._client.aretain.call_args.kwargs
+        assert call_kwargs["strategy"] == "self-events"
+
     def test_retain_autokey_uses_context_id_when_enabled(self, provider_with_config):
         p = provider_with_config(retain_autokey_context_tags=["pouls"])
         p.handle_tool_call(
@@ -601,6 +736,27 @@ class TestToolHandlers:
         ))
         assert "Memory 1" in result["result"]
         assert "Memory 2" in result["result"]
+
+    def test_recall_includes_document_id_when_available(self, provider):
+        provider._client.arecall.return_value = SimpleNamespace(
+            results=[
+                SimpleNamespace(document_id="doc-1", text="Memory 1"),
+                SimpleNamespace(document=SimpleNamespace(id="doc-2"), text="Memory 2"),
+                SimpleNamespace(text="Memory without ID"),
+            ]
+        )
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall", {"query": "dark mode"}
+        ))
+
+        assert result["result"] == "\n".join(
+            [
+                "1. [doc-1] Memory 1",
+                "2. [doc-2] Memory 2",
+                "3. Memory without ID",
+            ]
+        )
 
     def test_recall_passes_max_tokens(self, provider_with_config):
         p = provider_with_config(recall_max_tokens=2048)
@@ -798,7 +954,7 @@ class TestToolHandlers:
         ))
 
         assert result["filtered_count"] == 1
-        assert "Le cron est horaire." in result["result"]
+        assert result["result"] == "1. [doc-2] Le cron est horaire."
         assert "18h" not in result["result"]
         assert result["corrections"] == []
 
@@ -1141,8 +1297,10 @@ class TestSyncTurn:
         assert item["metadata"]["agent_identity"] == "fakeassistantname"
         assert item["metadata"]["turn_index"] == "1"
         assert item["metadata"]["message_count"] == "2"
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", content[0][0]["timestamp"])
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", item["metadata"]["retained_at"])
+        local_timestamp_re = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}"
+        assert re.fullmatch(local_timestamp_re, content[0][0]["timestamp"])
+        assert re.fullmatch(local_timestamp_re, content[0][1]["timestamp"])
+        assert re.fullmatch(local_timestamp_re, item["metadata"]["retained_at"])
 
     def test_sync_turn_skipped_when_auto_retain_off(self, provider_with_config):
         p = provider_with_config(auto_retain=False)
@@ -1664,6 +1822,7 @@ class TestConfigSchema:
             "retain_every_n_turns", "retain_async", "retain_context",
             "recall_max_tokens", "recall_max_input_chars",
             "recall_prompt_preamble", "retain_autokey_context_tags",
+            "memory_router_enabled",
         }
         assert expected_keys.issubset(keys), f"Missing: {expected_keys - keys}"
 
@@ -1976,6 +2135,42 @@ class TestSharedEventLoopLifecycle:
 
 
 class TestShutdown:
+    def test_shutdown_defers_client_close_while_writer_in_flight(self, provider):
+        """Shutdown must not close aiohttp client under an active retain.
+
+        Closing the client from the shutdown thread while the writer is blocked
+        inside aretain_batch turns a slow retain into ServerDisconnectedError.
+        The writer should close its own client after the queued work settles.
+        """
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _slow_retain(**kwargs):
+            entered.set()
+            release.wait(timeout=5.0)
+
+        mock_client = provider._client
+        mock_client.aretain_batch = AsyncMock(side_effect=_slow_retain)
+        provider._writer_shutdown_timeout_secs = lambda: 0.05
+
+        provider.sync_turn("hello", "hi")
+        assert entered.wait(timeout=2.0)
+
+        provider.shutdown()
+
+        assert provider._writer_thread is not None
+        assert provider._writer_thread.is_alive()
+        mock_client.aclose.assert_not_called()
+
+        release.set()
+        provider._writer_thread.join(timeout=2.0)
+
+        assert not provider._writer_thread.is_alive()
+        mock_client.aclose.assert_called_once()
+        assert provider._client is None
+
     def test_local_embedded_shutdown_closes_inner_async_client_on_shared_loop(self, provider):
         inner_client = _make_mock_client()
         embedded = MagicMock()

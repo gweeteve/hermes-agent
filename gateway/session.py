@@ -93,6 +93,7 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    internal_kind: Optional[str] = None  # Synthetic internal event kind, e.g. "calendar_wakeup"
     
     @property
     def description(self) -> str:
@@ -136,6 +137,8 @@ class SessionSource:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.internal_kind:
+            d["internal_kind"] = self.internal_kind
         return d
 
     @classmethod
@@ -154,6 +157,7 @@ class SessionSource:
             guild_id=data.get("guild_id"),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            internal_kind=data.get("internal_kind"),
         )
     
 

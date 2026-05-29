@@ -127,6 +127,12 @@ def _paths(paths):
     }
 
 
+def _write_traits(tmp_path, traits):
+    (tmp_path / "desire_traits.json").write_text(
+        json.dumps({"schema_version": 1, "traits": traits})
+    )
+
+
 def test_rebound_blocked_when_inner_state_stale(tmp_path):
     paths = _write_persona(tmp_path, timestamp="2026-05-21T00:00:00Z")
 
@@ -209,6 +215,67 @@ def test_rebound_added_when_deterministic_score_allows(tmp_path):
     assert result.added is True
     assert result.score >= 0.65
     assert result.response.endswith("confirmer que le log est propre.")
+
+
+def test_rebound_score_uses_configured_rebond_trait_weights(tmp_path):
+    paths = _write_persona(tmp_path)
+    _write_traits(
+        tmp_path,
+        [
+            {"name": "ne_pas_deranger", "weight": 0.5},
+            {"name": "rebond_momentum", "weight": 0.0},
+            {"name": "rebond_profondeur", "weight": 1.0},
+            {"name": "rebond_nouveaute", "weight": 0.0},
+            {"name": "rebond_resonance", "weight": 0.0},
+            {"name": "rebond_elan", "weight": 0.0},
+        ],
+    )
+
+    result = maybe_add_conversation_rebound(
+        response="Le module runtime reste stable.",
+        message_text="Architecture gateway runtime",
+        history=_history(),
+        source=_source(),
+        now=1779482475.0,
+        call_llm_fn=lambda **_: (_ for _ in ()).throw(AssertionError("no call")),
+        **_paths(paths),
+    )
+
+    assert result.added is False
+    assert result.reason == "score_below_threshold"
+    assert result.score == result.dimensions["profondeur"] == 0.6
+    assert result.weights["profondeur"] == 1.0
+
+
+def test_rebound_missing_trait_uses_default_weight_with_warning(tmp_path, caplog):
+    paths = _write_persona(tmp_path)
+    _write_traits(
+        tmp_path,
+        [
+            {"name": "ne_pas_deranger", "weight": 0.5},
+            {"name": "rebond_momentum", "weight": 0.0},
+            {"name": "rebond_profondeur", "weight": 0.0},
+            {"name": "rebond_nouveaute", "weight": 0.0},
+            {"name": "rebond_resonance", "weight": 0.0},
+        ],
+    )
+    caplog.set_level("WARNING", logger="agent.conversation_turn_policy")
+
+    result = maybe_add_conversation_rebound(
+        response="J'ai corrige le runtime gateway pour le rebond deterministe.",
+        message_text="Peux-tu debugger le rebond gateway ?",
+        history=_history(),
+        source=_source(),
+        now=1779482475.0,
+        call_llm_fn=lambda **_: _Response("Je peux aussi surveiller le prochain tour."),
+        **_paths(paths),
+    )
+
+    assert result.added is True
+    assert result.weight_fallbacks == ["rebond_elan"]
+    assert result.weights["elan"] == 0.7
+    assert result.score == result.dimensions["elan"] == 0.82
+    assert "rebond_elan" in caplog.text
 
 
 def test_rebound_retries_when_model_exhausts_output_budget(tmp_path):
@@ -345,4 +412,7 @@ def test_rebound_cooldowns_block_consecutive_and_window(tmp_path):
     )
 
     assert consecutive.reason == "consecutive_cooldown"
+    assert consecutive.score >= 0.65
+    assert set(consecutive.dimensions) == {"momentum", "profondeur", "nouveaute", "resonance", "elan"}
     assert window.reason == "window_cooldown"
+    assert window.score >= 0.65

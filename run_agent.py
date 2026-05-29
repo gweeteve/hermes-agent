@@ -143,7 +143,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, load_self_model_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -2162,12 +2162,16 @@ class AIAgent:
           - process_registry entries for task_id (user's bg shells)
           - terminal sandbox for task_id (cwd, env, shell state)
           - browser daemon for task_id (open tabs, cookies)
-          - memory provider (has its own lifecycle; keeps running)
+          - durable external memory contents (only this provider client's
+            sockets are closed below)
 
         We DO close:
           - OpenAI/httpx client pool (big chunk of held memory + sockets;
             the rebuilt agent gets a fresh client anyway)
           - Active child subagents (per-turn artefacts; safe to drop)
+          - External memory provider clients. The provider instance is owned by
+            this AIAgent, so leaving it open during cache eviction lets aiohttp
+            sessions be garbage-collected without aclose().
 
         Safe to call multiple times.  Distinct from close() — which is the
         hard teardown for actual session boundaries (/new, /reset, session
@@ -2187,6 +2191,17 @@ class AIAgent:
                         child.close()
                     except Exception:
                         pass
+        except Exception:
+            pass
+
+        # Close external memory clients without firing on_session_end(); cache
+        # eviction is not a semantic session boundary, but the provider object
+        # will be discarded and must release its aiohttp/http clients now.
+        try:
+            manager = getattr(self, "_memory_manager", None)
+            if manager is not None:
+                manager.shutdown_all()
+                self._memory_manager = None
         except Exception:
             pass
 

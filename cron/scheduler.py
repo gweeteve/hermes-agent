@@ -1862,12 +1862,18 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _session_db.close()
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
-        # Release subprocesses, terminal sandboxes, browser daemons, and the
-        # main OpenAI/httpx client held by this ephemeral cron agent. Without
-        # this, a gateway that ticks cron every N minutes leaks fds per job
-        # until it hits EMFILE (#10200 / "too many open files").
+        # Release memory providers, subprocesses, terminal sandboxes, browser
+        # daemons, and the main OpenAI/httpx client held by this ephemeral cron
+        # agent. Without this, a gateway that ticks cron every N minutes leaks
+        # fds per job until it hits EMFILE (#10200 / "too many open files").
         try:
             if agent is not None:
+                if hasattr(agent, "shutdown_memory_provider"):
+                    session_messages = getattr(agent, "_session_messages", None)
+                    if isinstance(session_messages, list):
+                        agent.shutdown_memory_provider(session_messages)
+                    else:
+                        agent.shutdown_memory_provider()
                 agent.close()
         except (Exception, KeyboardInterrupt) as e:
             logger.debug("Job '%s': failed to close agent resources: %s", job_id, e)

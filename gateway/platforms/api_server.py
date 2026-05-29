@@ -2713,6 +2713,133 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response({"error": str(e)}, status=500)
 
     # ------------------------------------------------------------------
+    # Judy calendar API
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _calendar_db():
+        from hermes_cli import calendar_db
+
+        return calendar_db
+
+    async def _handle_calendar_list(self, request: "web.Request") -> "web.Response":
+        """GET /api/calendar — list calendar events."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._calendar_db()
+            tags = request.query.getall("tags", None)
+            if not tags and request.query.get("tags"):
+                tags = request.query.get("tags")
+            events = db.list_events(
+                status=request.query.get("status"),
+                from_=request.query.get("from"),
+                to=request.query.get("to"),
+                tags=tags,
+                limit=int(request.query.get("limit", "50")),
+            )
+            return web.json_response({"events": events})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_calendar_upcoming(self, request: "web.Request") -> "web.Response":
+        """GET /api/calendar/upcoming — list upcoming pending events."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            events = self._calendar_db().upcoming_events(
+                limit=int(request.query.get("limit", "5")),
+            )
+            return web.json_response({"events": events})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_calendar_due(self, request: "web.Request") -> "web.Response":
+        """GET /api/calendar/due — atomically claim due events for wakeup."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            events = self._calendar_db().claim_due_events(
+                limit=int(request.query.get("limit", "10")),
+            )
+            return web.json_response({"events": events})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_calendar_create(self, request: "web.Request") -> "web.Response":
+        """POST /api/calendar — create a calendar event."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+            event = self._calendar_db().add_event(
+                title=body.get("title"),
+                scheduled_at=body.get("scheduled_at"),
+                description=body.get("description"),
+                recurrence=body.get("recurrence"),
+                tags=body.get("tags"),
+                context=body.get("context"),
+                created_by=body.get("created_by", "judy"),
+                session_id=body.get("session_id"),
+            )
+            return web.json_response({"event": event}, status=201)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_calendar_update(self, request: "web.Request") -> "web.Response":
+        """PATCH /api/calendar/{event_id} — update a calendar event."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            event_id = int(request.match_info["event_id"])
+            body = await request.json()
+            event = self._calendar_db().update_event(
+                event_id,
+                title=body.get("title"),
+                scheduled_at=body.get("scheduled_at"),
+                description=body.get("description"),
+                recurrence=body.get("recurrence"),
+                tags=body.get("tags"),
+                context=body.get("context"),
+            )
+            if not event:
+                return web.json_response({"error": "Calendar event not found"}, status=404)
+            return web.json_response({"event": event})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_calendar_delete(self, request: "web.Request") -> "web.Response":
+        """DELETE /api/calendar/{event_id} — soft-cancel a calendar event."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            event_id = int(request.match_info["event_id"])
+            event = self._calendar_db().cancel_event(event_id)
+            if not event:
+                return web.json_response({"error": "Calendar event not found"}, status=404)
+            return web.json_response({"event": event})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # Output extraction helper
     # ------------------------------------------------------------------
 
@@ -3505,6 +3632,13 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Judy calendar API
+            self._app.router.add_get("/api/calendar", self._handle_calendar_list)
+            self._app.router.add_post("/api/calendar", self._handle_calendar_create)
+            self._app.router.add_get("/api/calendar/upcoming", self._handle_calendar_upcoming)
+            self._app.router.add_get("/api/calendar/due", self._handle_calendar_due)
+            self._app.router.add_patch("/api/calendar/{event_id:\\d+}", self._handle_calendar_update)
+            self._app.router.add_delete("/api/calendar/{event_id:\\d+}", self._handle_calendar_delete)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)

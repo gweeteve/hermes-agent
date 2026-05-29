@@ -949,6 +949,45 @@ class TestRunJobSessionPersistence:
         assert "RuntimeError: boom" in error
         mock_agent.close.assert_called_once()
 
+    def test_run_job_shuts_down_memory_provider_before_close(self, tmp_path):
+        # Regression: cron agents with memory enabled create Hindsight aiohttp
+        # clients. ``agent.close()`` only releases tool/httpx resources, so the
+        # memory provider must be shut down explicitly for ephemeral cron runs.
+        job = {
+            "id": "memory-clean-job",
+            "name": "memory-clean",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+        transcript = [{"role": "user", "content": "hello"}]
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent._session_messages = transcript
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, _final_response, _error = run_job(job)
+
+        assert success is True
+        mock_agent.shutdown_memory_provider.assert_called_once_with(transcript)
+        mock_agent.close.assert_called_once()
+        method_names = [call[0] for call in mock_agent.method_calls]
+        assert method_names.index("shutdown_memory_provider") < method_names.index("close")
+
     def test_run_job_reaps_stale_auxiliary_clients_per_tick(self, tmp_path):
         # Regression: auxiliary clients bound to the cron worker's dead
         # event loop must be reaped each tick. Without this, ``_client_cache``

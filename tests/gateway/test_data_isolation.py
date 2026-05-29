@@ -240,6 +240,26 @@ def test_configured_admin_overrides_stale_context_level(monkeypatch, tmp_path):
     ).allowed is True
 
 
+def test_calendar_home_admin_can_advertise_memory_but_guest_synthetic_cannot(monkeypatch, tmp_path):
+    _reset_isolation(monkeypatch, tmp_path)
+    cfg = data_isolation.empty_config()
+    cfg["contacts"] = {
+        "telegram:user:888933588": {"level": "admin", "display_name": "Admin"},
+    }
+    data_isolation.save_config(cfg, tmp_path / "data_isolation.json")
+
+    assert data_isolation.can_advertise_tool(
+        "hindsight_retain",
+        identity_key="telegram:user:888933588",
+        level="guest",
+    ) is True
+    assert data_isolation.can_advertise_tool(
+        "hindsight_retain",
+        identity_key="telegram:user:system:calendar",
+        level="guest",
+    ) is False
+
+
 def test_active_project_grant_overrides_role_tools(monkeypatch, tmp_path):
     _reset_isolation(monkeypatch, tmp_path)
     cfg = data_isolation.empty_config()

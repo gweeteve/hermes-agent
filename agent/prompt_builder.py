@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Context file scanning — detect prompt injection in AGENTS.md, .cursorrules,
-# SOUL.md before they get injected into the system prompt.
+# SOUL.md / SELF_MODEL.md before they get injected into the system prompt.
 # ---------------------------------------------------------------------------
 
 _CONTEXT_THREAT_PATTERNS = [
@@ -1335,6 +1335,28 @@ def load_soul_md() -> Optional[str]:
         return content
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
+        return None
+
+
+def load_self_model_md() -> Optional[str]:
+    """Load SELF_MODEL.md from HERMES_HOME and return its content, or None.
+
+    SELF_MODEL.md is Judy's continuous self-model — recent self-events,
+    active inquiries, and growing edges. It is injected after identity in
+    the stable prompt tier.
+    """
+    self_model_path = get_hermes_home() / "SELF_MODEL.md"
+    if not self_model_path.exists():
+        return None
+    try:
+        content = self_model_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _scan_context_content(content, "SELF_MODEL.md")
+        content = _truncate_content(content, "SELF_MODEL.md")
+        return content
+    except Exception as e:
+        logger.debug("Could not read SELF_MODEL.md from %s: %s", self_model_path, e)
         return None
 
 

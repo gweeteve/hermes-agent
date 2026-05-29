@@ -165,6 +165,7 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
     """Stream a Codex Responses image_generation call and return the b64 image."""
     image_b64: Optional[str] = None
 
+    final = None
     with client.responses.stream(
         model=_CODEX_CHAT_MODEL,
         store=False,
@@ -189,19 +190,37 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
             "tools": [{"type": "image_generation"}],
         },
     ) as stream:
-        for event in stream:
-            event_type = getattr(event, "type", "")
-            if event_type == "response.output_item.done":
-                item = getattr(event, "item", None)
-                if getattr(item, "type", None) == "image_generation_call":
-                    result = getattr(item, "result", None)
-                    if isinstance(result, str) and result:
-                        image_b64 = result
-            elif event_type == "response.image_generation_call.partial_image":
-                partial = getattr(event, "partial_image_b64", None)
-                if isinstance(partial, str) and partial:
-                    image_b64 = partial
-        final = stream.get_final_response()
+        try:
+            for event in stream:
+                event_type = getattr(event, "type", "")
+                if event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", None) == "image_generation_call":
+                        result = getattr(item, "result", None)
+                        if isinstance(result, str) and result:
+                            image_b64 = result
+                elif event_type == "response.image_generation_call.partial_image":
+                    partial = getattr(event, "partial_image_b64", None)
+                    if isinstance(partial, str) and partial:
+                        image_b64 = partial
+        except TypeError as exc:
+            # The ChatGPT/Codex backend can complete image streams with a
+            # response snapshot whose output is null. openai-python currently
+            # tries to iterate it while building the final parsed response,
+            # raising "'NoneType' object is not iterable" after partial image
+            # events have already delivered usable PNG bytes.
+            if not image_b64 or "NoneType" not in str(exc):
+                raise
+            logger.debug("Codex image stream ended with null output snapshot; using streamed image")
+
+        try:
+            final = stream.get_final_response()
+        except Exception as exc:
+            message = str(exc)
+            recoverable = "NoneType" in message or "response.completed" in message
+            if not image_b64 or not recoverable:
+                raise
+            logger.debug("Codex final response parse failed after image bytes; using streamed image")
 
     # Final-response sweep covers the case where the stream finished before
     # we observed the ``output_item.done`` event for the image call.

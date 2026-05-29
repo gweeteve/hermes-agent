@@ -350,25 +350,65 @@ _CACHE_DIRS: list[tuple[str, str]] = [
 ]
 
 
+def default_cache_container_base() -> str:
+    """Return the cache mount base path visible inside Docker sandboxes."""
+    terminal_env = os.environ.get("TERMINAL_ENV", "").strip().lower()
+    run_as_host = os.environ.get("TERMINAL_DOCKER_RUN_AS_HOST_USER", "").strip().lower()
+
+    if not terminal_env or not run_as_host:
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = load_config()
+            terminal = cfg.get("terminal") if isinstance(cfg, dict) else None
+            if isinstance(terminal, dict):
+                terminal_env = terminal_env or str(terminal.get("backend") or "").strip().lower()
+                if not run_as_host:
+                    run_as_host = str(terminal.get("docker_run_as_host_user") or "").strip().lower()
+        except Exception:
+            pass
+
+    if terminal_env == "docker":
+        if run_as_host in {"1", "true", "yes", "on"}:
+            return "/workspace/shared/.hermes"
+    return "/root/.hermes"
+
+
+def _host_visible_cache_path(path: Path) -> Path:
+    """Translate container HERMES_HOME paths for nested host-Docker mounts."""
+    host_home = os.environ.get("HERMES_HOST_HOME", "").strip()
+    if not host_home:
+        return path
+    try:
+        rel = path.resolve(strict=False).relative_to(Path(os.environ.get("HERMES_HOME", "")).resolve(strict=False))
+    except (OSError, ValueError):
+        return path
+    return Path(host_home).expanduser() / rel
+
+
 def get_cache_directory_mounts(
     container_base: str = "/root/.hermes",
 ) -> List[Dict[str, str]]:
     """Return mount entries for each cache directory that exists on disk.
 
     Used by Docker to create bind mounts.  Each entry has ``host_path`` and
-    ``container_path`` keys.  The host path is resolved via
-    ``get_hermes_dir()`` for backward compatibility with old directory layouts.
+    ``container_path`` keys.  Prefer the consolidated ``cache/*`` layout when
+    it exists; fall back to legacy names for old installs that have not
+    created the new directory yet.
     """
-    from hermes_constants import get_hermes_dir
+    from hermes_constants import get_hermes_home
 
     mounts: List[Dict[str, str]] = []
+    hermes_home = get_hermes_home()
     for new_subpath, old_name in _CACHE_DIRS:
-        host_dir = get_hermes_dir(new_subpath, old_name)
+        new_dir = hermes_home / new_subpath
+        old_dir = hermes_home / old_name
+        host_dir = new_dir if new_dir.is_dir() else old_dir
         if host_dir.is_dir():
             # Always map to the *new* container layout regardless of host layout.
             container_path = f"{container_base.rstrip('/')}/{new_subpath}"
             mounts.append({
-                "host_path": str(host_dir),
+                "host_path": str(_host_visible_cache_path(host_dir)),
                 "container_path": container_path,
             })
     return mounts
@@ -376,7 +416,7 @@ def get_cache_directory_mounts(
 
 def to_agent_visible_cache_path(
     host_path: str,
-    container_base: str = "/root/.hermes",
+    container_base: str | None = None,
 ) -> str:
     """Translate a host cache path to its mounted path inside the sandbox.
 
@@ -392,6 +432,8 @@ def to_agent_visible_cache_path(
         return host_path
 
     path = Path(host_path)
+    if container_base is None:
+        container_base = default_cache_container_base()
     for mount in get_cache_directory_mounts(container_base=container_base):
         host_dir = Path(mount["host_path"])
         try:
@@ -432,5 +474,3 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-
-

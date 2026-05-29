@@ -69,6 +69,10 @@ _HERMES_CORE_TOOLS = [
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock", "kanban_update", "kanban_schedule",
     "kanban_review",
+    # Judy agentic calendar — voluntary wakeups backed by PostgreSQL and
+    # routed through the gateway home channel.
+    "calendar_add", "calendar_list", "calendar_upcoming",
+    "calendar_cancel", "calendar_update", "calendar_done",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
 ]
@@ -183,6 +187,15 @@ TOOLSETS = {
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
         "tools": ["cronjob"],
+        "includes": []
+    },
+
+    "calendar": {
+        "description": "Judy calendar tools for voluntary scheduled wakeups and reminders",
+        "tools": [
+            "calendar_add", "calendar_list", "calendar_upcoming",
+            "calendar_cancel", "calendar_update", "calendar_done",
+        ],
         "includes": []
     },
     

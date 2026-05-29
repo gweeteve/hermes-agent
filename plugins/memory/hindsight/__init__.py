@@ -44,10 +44,11 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
-from hermes_time import format_utc_z, parse_utc_z, utc_now
+from hermes_time import parse_utc_z
 from hermes_constants import get_hermes_home
 from tools.registry import tool_error
 from hermes_cli.config import cfg_get
+from .memory_router import classify as classify_memory
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,10 @@ RETAIN_SCHEMA = {
                 "enum": ["append", "replace"],
                 "description": "Advanced Hindsight update mode. 'replace' uses the backend default overwrite behavior.",
             },
+            "strategy": {
+                "type": "string",
+                "description": "Optional configured Hindsight retain strategy name for this call.",
+            },
             "tags": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -492,9 +497,9 @@ def _load_global_priority_tags() -> List[str]:
     return _normalize_retain_tags(hindsight_config.get("priority_tags"))
 
 
-def _utc_timestamp() -> str:
-    """Return current UTC timestamp in canonical UTC-Z format."""
-    return format_utc_z(utc_now())
+def _system_timestamp() -> str:
+    """Return current timestamp using the system local timezone."""
+    return datetime.now().isoformat(timespec="milliseconds")
 
 
 def _compact_text(value: Any) -> str:
@@ -861,6 +866,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._writer_thread: threading.Thread | None = None
         self._shutting_down = threading.Event()
         self._atexit_registered = False
+        self._close_client_after_writer = False
         # Legacy alias — older tests/callers reference _sync_thread directly.
         # Points at _writer_thread once the writer is running.
         self._sync_thread = None
@@ -877,6 +883,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_dedupe_context_tags = list(_DEFAULT_PREFETCH_DEDUPE_CONTEXT_TAGS)
         self._prefetch_dedupe_enabled = True
         self._retain_autokey_context_tags: list[str] = []
+        self._memory_router_enabled = False
         self._correction_visibility = "suppressive"
         self._memory_hygiene_path = Path(
             os.environ.get(
@@ -1179,6 +1186,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "prefetch_dedupe_context_tags", "description": "Context tags whose recurring memories are deduplicated before injection", "default": _DEFAULT_PREFETCH_DEDUPE_CONTEXT_TAGS},
             {"key": "prefetch_dedupe_enabled", "description": "Deduplicate recurring persona context memories before injection", "default": True},
             {"key": "retain_autokey_context_tags", "description": "Opt-in tags whose tool retains get a stable document_id derived from tag and context/source/context_id when none is supplied", "default": ""},
+            {"key": "memory_router_enabled", "description": "Enrich retained memories with deterministic class, priority, and tags", "default": False},
             {"key": "correction_visibility", "description": "How memory hygiene corrections are injected: suppressive, visible, or visible_first", "default": "suppressive"},
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {"key": "auto_retain", "description": "Automatically retain conversation turns", "default": True},
@@ -1296,22 +1304,64 @@ class HindsightMemoryProvider(MemoryProvider):
         Each job() is wrapped so a single failure can't kill the writer.
         task_done() always fires so queue.join() works in tests.
         """
-        while True:
-            try:
-                job = self._retain_queue.get(timeout=1.0)
-            except queue.Empty:
-                if self._shutting_down.is_set():
-                    return
-                continue
-            try:
-                if job is _WRITER_SENTINEL:
-                    return
+        try:
+            while True:
                 try:
-                    job()
-                except Exception as exc:
-                    logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
-            finally:
-                self._retain_queue.task_done()
+                    job = self._retain_queue.get(timeout=1.0)
+                except queue.Empty:
+                    if self._shutting_down.is_set():
+                        return
+                    continue
+                try:
+                    if job is _WRITER_SENTINEL:
+                        return
+                    try:
+                        job()
+                    except Exception as exc:
+                        logger.warning("Hindsight retain failed: %s", exc, exc_info=True)
+                finally:
+                    self._retain_queue.task_done()
+        finally:
+            if self._close_client_after_writer:
+                self._close_client()
+
+    def _writer_shutdown_timeout_secs(self) -> float:
+        """Return how long shutdown should wait for the retain writer."""
+        try:
+            configured = float(self._timeout or _DEFAULT_TIMEOUT)
+        except Exception:
+            configured = float(_DEFAULT_TIMEOUT)
+        return min(max(15.0, configured), 30.0)
+
+    def _close_client(self) -> None:
+        """Close this provider's Hindsight client without stopping the shared loop."""
+        if self._client is None:
+            return
+        try:
+            if self._mode == "local_embedded":
+                # HindsightEmbedded.close() delegates to its sync client.close().
+                # When Hermes created/used that client on the shared async loop,
+                # closing it from this thread can raise "attached to a different
+                # loop" before aiohttp releases the session. Close the embedded
+                # inner async client on the shared loop first, then let the
+                # wrapper clean up daemon/UI bookkeeping.
+                inner_client = getattr(self._client, "_client", None)
+                if inner_client is not None and hasattr(inner_client, "aclose"):
+                    _run_sync(inner_client.aclose())
+                    try:
+                        self._client._client = None
+                    except Exception:
+                        pass
+                try:
+                    self._client.close()
+                except RuntimeError:
+                    pass
+            else:
+                self._run_sync(self._client.aclose())
+        except Exception:
+            pass
+        finally:
+            self._client = None
 
     def _register_atexit(self) -> None:
         """Register an idempotent atexit hook to drain the writer.
@@ -1519,7 +1569,12 @@ class HindsightMemoryProvider(MemoryProvider):
     def _format_recall_results(self, results: list[Any]) -> str:
         if not results:
             return "No relevant memories found."
-        return "\n".join(f"{i}. {_memory_result_text(result)}" for i, result in enumerate(results, 1))
+        lines = []
+        for i, result in enumerate(results, 1):
+            document_id = _memory_document_id(result)
+            prefix = f"[{document_id}] " if document_id else ""
+            lines.append(f"{i}. {prefix}{_memory_result_text(result)}")
+        return "\n".join(lines)
 
     def _apply_memory_hygiene(self, results: list[Any]) -> tuple[list[Any], list[str], int]:
         hygiene_items = [
@@ -1803,6 +1858,10 @@ class HindsightMemoryProvider(MemoryProvider):
         self._retain_autokey_context_tags = _normalize_retain_tags(
             self._config.get("retain_autokey_context_tags")
         )
+        self._memory_router_enabled = _parse_bool_setting(
+            self._config.get("memory_router_enabled"),
+            False,
+        )
         correction_visibility = str(self._config.get("correction_visibility") or "suppressive").strip()
         if correction_visibility not in _VALID_CORRECTION_VISIBILITY:
             logger.warning(
@@ -1971,7 +2030,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
-        now = _utc_timestamp()
+        now = _system_timestamp()
         return [
             {
                 "role": "user",
@@ -1987,7 +2046,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _build_metadata(self, *, message_count: int, turn_index: int) -> Dict[str, str]:
         metadata: Dict[str, str] = {
-            "retained_at": _utc_timestamp(),
+            "retained_at": _system_timestamp(),
             "message_count": str(message_count),
             "turn_index": str(turn_index),
         }
@@ -2043,6 +2102,7 @@ class HindsightMemoryProvider(MemoryProvider):
         tags: List[str] | None = None,
         visibility: str | None = None,
         update_mode: str | None = None,
+        strategy: str | None = None,
         retain_async: bool | None = None,
     ) -> Dict[str, Any]:
         metadata = metadata or self._build_metadata(message_count=1, turn_index=self._turn_index)
@@ -2060,6 +2120,14 @@ class HindsightMemoryProvider(MemoryProvider):
             if tag not in merged_tags:
                 merged_tags.append(tag)
         merged_tags = self._apply_visibility_to_retain(metadata, merged_tags, visibility)
+        router_result: dict[str, Any] | None = None
+        if self._memory_router_enabled:
+            router_result = classify_memory(content, context or "")
+            metadata["memory_class"] = str(router_result.get("class") or "")
+            metadata["memory_priority"] = str(router_result.get("priority") or "")
+            for tag in _normalize_retain_tags(router_result.get("tags")):
+                if tag not in merged_tags:
+                    merged_tags.append(tag)
         document_id = str(document_id or "").strip() or self._derive_retain_document_id(
             context=context,
             metadata=metadata,
@@ -2069,6 +2137,15 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["document_id"] = document_id
         if update_mode and update_mode != "replace":
             kwargs["update_mode"] = update_mode
+        strategy = str(strategy or "").strip()
+        if (
+            not strategy
+            and router_result
+            and router_result.get("class") in {"identity", "relation"}
+        ):
+            strategy = "self-events"
+        if strategy:
+            kwargs["strategy"] = strategy
         if merged_tags:
             kwargs["tags"] = merged_tags
         return kwargs
@@ -2186,6 +2263,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     tags=args.get("tags"),
                     visibility=args.get("visibility"),
                     update_mode=update_mode or None,
+                    strategy=str(args.get("strategy") or "").strip() or None,
                 )
                 logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
                              self._bank_id, len(content), context)
@@ -2228,7 +2306,7 @@ class HindsightMemoryProvider(MemoryProvider):
             tags = _normalize_retain_tags(args.get("tags") or ["correction", "hygiene-memoire"])
             try:
                 candidates = self._find_invalidation_candidates(query, memory_id, document_id)
-                now = _utc_timestamp()
+                now = _system_timestamp()
                 for candidate in candidates:
                     self._append_memory_hygiene(
                         {
@@ -2443,45 +2521,30 @@ class HindsightMemoryProvider(MemoryProvider):
         # the sentinel. Bounded join keeps shutdown predictable even if
         # the daemon is wedged.
         writer = self._writer_thread
-        if writer is not None and writer.is_alive():
+        writer_was_alive = writer is not None and writer.is_alive()
+        if writer_was_alive:
+            # The writer may currently be blocked in aiohttp. Do not close the
+            # client from this shutdown thread while that request is in flight;
+            # doing so turns a slow retain into a forced ServerDisconnectedError.
+            self._close_client_after_writer = True
+            timeout = self._writer_shutdown_timeout_secs()
             try:
                 self._retain_queue.put(_WRITER_SENTINEL)
             except Exception:
                 pass
-            writer.join(timeout=10.0)
+            writer.join(timeout=timeout)
             if writer.is_alive():
+                pending = max(0, self._retain_queue.qsize() - 1)
                 logger.warning(
-                    "Hindsight writer did not stop within 10s; "
-                    "abandoning %d pending retain(s)",
-                    self._retain_queue.qsize(),
+                    "Hindsight writer still running after %.1fs; "
+                    "client close deferred until writer exits (%d queued retain(s))",
+                    timeout,
+                    pending,
                 )
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=5.0)
-        if self._client is not None:
-            try:
-                if self._mode == "local_embedded":
-                    # HindsightEmbedded.close() delegates to its sync client.close().
-                    # When Hermes created/used that client on the shared async loop,
-                    # closing it from this thread can raise "attached to a different
-                    # loop" before aiohttp releases the session. Close the embedded
-                    # inner async client on the shared loop first, then let the
-                    # wrapper clean up daemon/UI bookkeeping.
-                    inner_client = getattr(self._client, "_client", None)
-                    if inner_client is not None and hasattr(inner_client, "aclose"):
-                        _run_sync(inner_client.aclose())
-                        try:
-                            self._client._client = None
-                        except Exception:
-                            pass
-                    try:
-                        self._client.close()
-                    except RuntimeError:
-                        pass
-                else:
-                    self._run_sync(self._client.aclose())
-            except Exception:
-                pass
-            self._client = None
+        if not writer_was_alive:
+            self._close_client()
         # The module-global background event loop (_loop / _loop_thread)
         # is intentionally NOT stopped here. It is shared across every
         # HindsightMemoryProvider instance in the process — the plugin

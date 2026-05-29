@@ -168,7 +168,19 @@ def _images_cache_dir() -> Path:
 
     path = get_hermes_home() / "cache" / "images"
     path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o755)
+    except OSError:
+        logger.debug("Could not chmod image cache directory %s", path, exc_info=True)
     return path
+
+
+def _make_image_cache_file_readable(path: Path) -> None:
+    """Keep generated image files readable from sandbox bind mounts."""
+    try:
+        path.chmod(0o644)
+    except OSError:
+        logger.debug("Could not chmod generated image %s", path, exc_info=True)
 
 
 def save_b64_image(
@@ -188,6 +200,7 @@ def save_b64_image(
     short = uuid.uuid4().hex[:8]
     path = _images_cache_dir() / f"{prefix}_{ts}_{short}.{extension}"
     path.write_bytes(raw)
+    _make_image_cache_file_readable(path)
     return path
 
 
@@ -270,6 +283,7 @@ def save_url_image(
             pass
         raise ValueError(f"Image at {url} returned 0 bytes; refusing to cache.")
 
+    _make_image_cache_file_readable(path)
     return path
 
 
