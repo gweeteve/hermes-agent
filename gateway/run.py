@@ -9442,7 +9442,7 @@ class GatewayRunner:
                         return None
                     return None
 
-                async def _run_initiative_after_delivery() -> None:
+                def _run_initiative_after_delivery() -> None:
                     try:
                         maybe_take_initiative(
                             response=_initiative_response,

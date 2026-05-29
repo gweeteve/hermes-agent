@@ -725,6 +725,30 @@ class TestToolHandlers:
         call_kwargs = provider._client.aretain.call_args.kwargs
         assert call_kwargs["strategy"] == "self-events"
 
+
+    def test_retain_strips_strategy_for_older_client(self, provider):
+        captured = {}
+
+        async def old_aretain(bank_id, content, metadata=None, tags=None):
+            captured.update({
+                "bank_id": bank_id,
+                "content": content,
+                "metadata": metadata,
+                "tags": tags,
+            })
+            return SimpleNamespace(ok=True)
+
+        provider._client.aretain = old_aretain
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain",
+            {"content": "self event", "strategy": "self-events"},
+        ))
+
+        assert result["result"] == "Memory stored successfully."
+        assert captured["bank_id"] == "test-bank"
+        assert captured["content"] == "self event"
+
     def test_retain_autokey_uses_context_id_when_enabled(self, provider_with_config):
         p = provider_with_config(retain_autokey_context_tags=["pouls"])
         p.handle_tool_call(

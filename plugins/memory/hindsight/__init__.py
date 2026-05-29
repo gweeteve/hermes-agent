@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -1410,6 +1411,73 @@ class HindsightMemoryProvider(MemoryProvider):
             self._client = client
             return self._run_sync(operation(client))
 
+    @staticmethod
+    def _call_accepts_keyword(fn: Any, keyword: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return True
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD or name == keyword
+            for name, param in signature.parameters.items()
+        )
+
+    def _filter_aretain_kwargs_for_client(self, client: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if "strategy" not in kwargs:
+            return kwargs
+        if self._call_accepts_keyword(getattr(client, "aretain", None), "strategy"):
+            return kwargs
+        filtered = dict(kwargs)
+        filtered.pop("strategy", None)
+        return filtered
+
+    async def _aretain_compat(self, client: Any, kwargs: Dict[str, Any]) -> Any:
+        call_kwargs = self._filter_aretain_kwargs_for_client(client, kwargs)
+        try:
+            return await client.aretain(**call_kwargs)
+        except TypeError as exc:
+            if "strategy" in call_kwargs and "unexpected keyword argument 'strategy'" in str(exc):
+                retry_kwargs = dict(call_kwargs)
+                retry_kwargs.pop("strategy", None)
+                return await client.aretain(**retry_kwargs)
+            raise
+
+    async def _aretain_batch_compat(
+        self,
+        client: Any,
+        *,
+        bank_id: str,
+        items: List[Dict[str, Any]],
+        document_id: str | None,
+        retain_async: bool,
+    ) -> Any:
+        try:
+            return await client.aretain_batch(
+                bank_id=bank_id,
+                items=items,
+                document_id=document_id,
+                retain_async=retain_async,
+            )
+        except TypeError as exc:
+            if "strategy" not in str(exc) or "unexpected keyword" not in str(exc):
+                raise
+            filtered_items = []
+            changed = False
+            for item in items:
+                if "strategy" in item:
+                    changed = True
+                    item = dict(item)
+                    item.pop("strategy", None)
+                filtered_items.append(item)
+            if not changed:
+                raise
+            return await client.aretain_batch(
+                bank_id=bank_id,
+                items=filtered_items,
+                document_id=document_id,
+                retain_async=retain_async,
+            )
+
     def update_gateway_context(self, **kwargs: Any) -> None:
         """Refresh per-turn gateway identity on cached gateway agents."""
         self._platform = str(kwargs.get("platform") or self._platform or "").strip()
@@ -2233,7 +2301,8 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("Hindsight retain: bank=%s, doc=%s, mode=%s, async=%s, content_len=%d, num_turns=%d",
                          bank_id, document_id, update_mode, retain_async_flag, len(content), num_turns)
             self._run_hindsight_operation(
-                lambda client: client.aretain_batch(
+                lambda client: self._aretain_batch_compat(
+                    client,
                     bank_id=bank_id,
                     items=[item],
                     document_id=document_id,
@@ -2286,7 +2355,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 )
                 logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
                              self._bank_id, len(content), context)
-                self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
+                self._run_hindsight_operation(lambda client: self._aretain_compat(client, retain_kwargs))
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
             except Exception as e:
@@ -2344,7 +2413,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     context="memory hygiene correction",
                     tags=tags,
                 )
-                self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
+                self._run_hindsight_operation(lambda client: self._aretain_compat(client, retain_kwargs))
                 return json.dumps(
                     {
                         "invalidated_count": len(candidates),

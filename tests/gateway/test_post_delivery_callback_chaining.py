@@ -6,6 +6,8 @@ registration API chains them rather than clobbering. Per-callback
 exceptions are swallowed so one bad callback can't sabotage the others.
 Stale-generation registrations are rejected.
 """
+import asyncio
+
 import pytest
 
 from gateway.config import Platform, PlatformConfig
@@ -57,6 +59,25 @@ class TestPostDeliveryCallbackChaining:
         cb = adapter.pop_post_delivery_callback("s")
         cb()
         assert fired == ["A", "B", "C"]
+
+
+    def test_async_callbacks_chain_without_leaking_coroutines(self, adapter):
+        fired = []
+
+        async def first():
+            fired.append("A")
+
+        async def second():
+            fired.append("B")
+
+        adapter.register_post_delivery_callback("s", first)
+        adapter.register_post_delivery_callback("s", second)
+        cb = adapter.pop_post_delivery_callback("s")
+
+        result = cb()
+        assert asyncio.iscoroutine(result)
+        asyncio.run(result)
+        assert fired == ["A", "B"]
 
     def test_exception_in_one_callback_does_not_block_next(self, adapter):
         fired = []
