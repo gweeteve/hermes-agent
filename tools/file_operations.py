@@ -729,8 +729,27 @@ class ShellFileOperations(FileOperations):
                     if expand_result.exit_code == 0 and expand_result.stdout.strip():
                         user_home = expand_result.stdout.strip()
                         suffix = path[1 + len(username):]  # e.g. "/rest/of/path"
-                        return user_home + suffix
-        
+                        path = user_home + suffix
+
+        mapper = getattr(type(self.env), "map_host_path_to_container", None)
+        if callable(mapper):
+            try:
+                mapped = mapper(self.env, path)
+                if isinstance(mapped, str):
+                    return mapped
+            except Exception:
+                pass
+        instance_mapper = getattr(getattr(self.env, "__dict__", {}), "get", lambda _k, _d=None: _d)(
+            "map_host_path_to_container"
+        )
+        if callable(instance_mapper):
+            try:
+                mapped = instance_mapper(path)
+                if isinstance(mapped, str):
+                    return mapped
+            except Exception:
+                pass
+
         return path
     
     def _escape_shell_arg(self, arg: str) -> str:

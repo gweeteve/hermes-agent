@@ -382,6 +382,19 @@ class TestShellFileOpsHelpers:
         ops = ShellFileOperations(env)
         assert ops.cwd == "/"
 
+    def test_expands_host_bind_mount_paths_for_docker_env(self, mock_env):
+        mock_env.map_host_path_to_container = lambda p: (
+            p.replace("/home/user/projects", "/workspace/projects", 1)
+            if p.startswith("/home/user/projects")
+            else p
+        )
+        ops = ShellFileOperations(mock_env)
+
+        assert (
+            ops._expand_path("/home/user/projects/persona/persona.json")
+            == "/workspace/projects/persona/persona.json"
+        )
+
     def test_read_file_strips_leaked_terminal_fence_markers(self, mock_env):
         leaked = (
             "'\x07__HERMES_FENCE_a9f7b3__\x1b]0;cat "

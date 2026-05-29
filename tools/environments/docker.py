@@ -313,6 +313,7 @@ class DockerEnvironment(BaseEnvironment):
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
         self._container_id: Optional[str] = None
+        self._host_path_mappings: list[tuple[str, str]] = []
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
         if volumes is not None and not isinstance(volumes, list):
@@ -356,6 +357,12 @@ class DockerEnvironment(BaseEnvironment):
                 continue
             if ":" in vol:
                 volume_args.extend(["-v", vol])
+                parts = vol.split(":", 2)
+                if len(parts) >= 2:
+                    host_path = os.path.abspath(os.path.expanduser(parts[0]))
+                    container_path = parts[1]
+                    if host_path and container_path.startswith("/"):
+                        self._host_path_mappings.append((host_path, container_path.rstrip("/") or "/"))
                 if ":/workspace" in vol:
                     workspace_explicitly_mounted = True
             else:
@@ -400,8 +407,11 @@ class DockerEnvironment(BaseEnvironment):
         if bind_host_cwd:
             logger.info(f"Mounting configured host cwd to /workspace: {host_cwd_abs}")
             volume_args = ["-v", f"{host_cwd_abs}:/workspace", *volume_args]
+            self._host_path_mappings.append((host_cwd_abs, "/workspace"))
         elif workspace_explicitly_mounted:
             logger.debug("Skipping docker cwd mount: /workspace already mounted by user config")
+
+        self._host_path_mappings.sort(key=lambda item: len(item[0]), reverse=True)
 
         # Mount credential files (OAuth tokens, etc.) declared by skills.
         # Read-only so the container can authenticate but not modify host creds.
@@ -568,6 +578,22 @@ class DockerEnvironment(BaseEnvironment):
         for key in sorted(exec_env):
             args.extend(["-e", f"{key}={exec_env[key]}"])
         return args
+
+    def map_host_path_to_container(self, path: str) -> str:
+        """Translate configured host bind-mount paths to container paths."""
+        if not path:
+            return path
+        expanded = os.path.abspath(os.path.expanduser(path))
+        for host_root, container_root in self._host_path_mappings:
+            if expanded == host_root:
+                return container_root
+            try:
+                rel = os.path.relpath(expanded, host_root)
+            except ValueError:
+                continue
+            if rel != "." and not rel.startswith(".."):
+                return os.path.join(container_root, rel)
+        return path
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
