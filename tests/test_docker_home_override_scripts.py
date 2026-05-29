@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_RUN = REPO_ROOT / "docker" / "s6-rc.d" / "dashboard" / "run"
+STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
 
 
 def test_dashboard_run_resets_home_before_dropping_privileges() -> None:
@@ -46,3 +47,12 @@ def test_dashboard_run_does_not_derive_insecure_from_bind_host() -> None:
         assert truthy in text, (
             f"HERMES_DASHBOARD_INSECURE should accept truthy value {truthy!r}"
         )
+
+
+def test_stage2_hook_adds_hermes_to_host_docker_socket_group() -> None:
+    text = STAGE2_HOOK.read_text(encoding="utf-8")
+
+    assert "/var/run/docker.sock" in text
+    assert "stat -c %g /var/run/docker.sock" in text
+    assert "groupadd -g \"$docker_sock_gid\"" in text
+    assert "usermod -aG \"$docker_sock_group\" hermes" in text

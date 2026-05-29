@@ -44,6 +44,29 @@ if [ -n "${HERMES_GID:-}" ] && [ "$HERMES_GID" != "$(id -g hermes)" ]; then
     groupmod -o -g "$HERMES_GID" hermes 2>/dev/null || true
 fi
 
+# --- Host Docker socket group ---
+# The gateway may need the host Docker daemon for the terminal backend.
+# docker-compose `group_add` is present on the container process, but
+# supervised services drop privileges through `s6-setuidgid hermes`, which
+# rebuilds supplementary groups from /etc/group. Mirror the mounted socket's
+# group into the hermes user's group list so services keep access to the
+# historical /var/run/docker.sock mount.
+if [ -S /var/run/docker.sock ]; then
+    docker_sock_gid=$(stat -c %g /var/run/docker.sock 2>/dev/null || true)
+    if [ -n "$docker_sock_gid" ]; then
+        docker_sock_group=$(getent group "$docker_sock_gid" | cut -d: -f1 || true)
+        if [ -z "$docker_sock_group" ]; then
+            docker_sock_group="docker-host"
+            groupadd -g "$docker_sock_gid" "$docker_sock_group" 2>/dev/null || true
+            docker_sock_group=$(getent group "$docker_sock_gid" | cut -d: -f1 || true)
+        fi
+        if [ -n "$docker_sock_group" ]; then
+            usermod -aG "$docker_sock_group" hermes 2>/dev/null || \
+                echo "[stage2] Warning: could not add hermes to Docker socket group $docker_sock_gid"
+        fi
+    fi
+fi
+
 # --- Fix ownership of data volume ---
 # When HERMES_UID is remapped or the top-level $HERMES_HOME isn't owned by
 # the runtime hermes UID, restore ownership to hermes — but ONLY for the

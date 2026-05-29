@@ -2188,17 +2188,12 @@ def check_terminal_requirements() -> bool:
             return True
 
         elif env_type == "docker":
-            from tools.environments.docker import find_docker, _docker_cli_env
+            from tools.environments.docker import find_docker
             docker = find_docker()
             if not docker:
                 logger.error("Docker executable not found in PATH or common install locations")
                 return False
-            result = subprocess.run(
-                [docker, "version"],
-                capture_output=True,
-                timeout=5,
-                env=_docker_cli_env(),
-            )
+            result = subprocess.run([docker, "version"], capture_output=True, timeout=5)
             return result.returncode == 0
 
         elif env_type == "singularity":

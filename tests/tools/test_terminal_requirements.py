@@ -61,35 +61,6 @@ def test_unknown_terminal_env_logs_error_and_returns_false(monkeypatch, caplog):
     )
 
 
-def test_docker_requirements_use_judy_docker_host(monkeypatch):
-    _clear_terminal_env(monkeypatch)
-    monkeypatch.setenv("TERMINAL_ENV", "docker")
-    monkeypatch.setenv("JUDY_DOCKER_HOST", "unix:///run/judy/docker.sock")
-    monkeypatch.setattr(
-        terminal_tool_module,
-        "managed_nous_tools_enabled",
-        lambda: False,
-    )
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-
-        class Result:
-            returncode = 0
-
-        return Result()
-
-    import tools.environments.docker as docker_env
-
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(terminal_tool_module.subprocess, "run", fake_run)
-
-    assert terminal_tool_module.check_terminal_requirements() is True
-    assert calls[0][1]["env"]["DOCKER_HOST"] == "unix:///run/judy/docker.sock"
-
-
 def test_ssh_backend_without_host_or_user_logs_and_returns_false(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
