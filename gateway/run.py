@@ -16135,6 +16135,67 @@ class GatewayRunner:
         agent._api_call_count = 0
 
     @staticmethod
+    def _refresh_cached_agent_tools(agent: Any) -> None:
+        """Refresh tool schemas on a reused cached agent.
+
+        Tool availability can change without an agent config-signature change:
+        Docker may become reachable after container init, plugin registry
+        checks may recover, or a check_fn TTL may expire. Cached agents keep
+        their original ``tools`` / ``valid_tool_names`` unless refreshed, which
+        can make the model call a tool that the validation layer rejects.
+        """
+        try:
+            from model_tools import get_tool_definitions
+
+            new_defs = get_tool_definitions(
+                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                quiet_mode=True,
+            )
+            new_names = {
+                t.get("function", {}).get("name")
+                for t in new_defs
+                if isinstance(t, dict)
+            }
+
+            enabled_toolsets = getattr(agent, "enabled_toolsets", None)
+            memory_manager = getattr(agent, "_memory_manager", None)
+            if (
+                memory_manager is not None
+                and (enabled_toolsets is None or "memory" in enabled_toolsets)
+            ):
+                for schema in memory_manager.get_all_tool_schemas():
+                    name = schema.get("name", "")
+                    if name and name not in new_names:
+                        new_defs.append({"type": "function", "function": schema})
+                        new_names.add(name)
+
+            context_compressor = getattr(agent, "context_compressor", None)
+            agent._context_engine_tool_names = set()
+            if (
+                context_compressor is not None
+                and (enabled_toolsets is None or "context_engine" in enabled_toolsets)
+            ):
+                for schema in context_compressor.get_tool_schemas():
+                    name = schema.get("name", "")
+                    if name and name not in new_names:
+                        new_defs.append({"type": "function", "function": schema})
+                        new_names.add(name)
+                        agent._context_engine_tool_names.add(name)
+
+            old_names = set(getattr(agent, "valid_tool_names", set()) or set())
+            if new_names != old_names:
+                logger.info(
+                    "Refreshed cached agent tools: added=%s removed=%s",
+                    sorted(new_names - old_names),
+                    sorted(old_names - new_names),
+                )
+                agent.tools = new_defs
+                agent.valid_tool_names = new_names
+        except Exception as exc:
+            logger.debug("Failed to refresh cached agent tools: %s", exc)
+
+    @staticmethod
     def _refresh_agent_gateway_context(agent: Any, source: SessionSource, identity_key: str, data_isolation_level: str = "") -> None:
         """Refresh per-turn gateway identity on cached agents and memory providers."""
         agent._user_id = source.user_id
@@ -17519,6 +17580,7 @@ class GatewayRunner:
                             except KeyError:
                                 pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
+                        self._refresh_cached_agent_tools(agent)
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:

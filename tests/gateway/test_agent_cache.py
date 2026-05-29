@@ -27,6 +27,41 @@ def _make_runner():
     return runner
 
 
+class TestCachedAgentToolRefresh:
+    def test_refresh_cached_agent_tools_recovers_static_and_memory_tools(self, monkeypatch):
+        from gateway.run import GatewayRunner
+        import model_tools
+
+        def fake_get_tool_definitions(**kwargs):
+            return [
+                {"type": "function", "function": {"name": "terminal"}},
+                {"type": "function", "function": {"name": "read_file"}},
+            ]
+
+        class MemoryManager:
+            def get_all_tool_schemas(self):
+                return [{"name": "hindsight_recall"}]
+
+        agent = MagicMock()
+        agent.enabled_toolsets = ["terminal", "file", "memory"]
+        agent.disabled_toolsets = []
+        agent.tools = [{"type": "function", "function": {"name": "process"}}]
+        agent.valid_tool_names = {"process"}
+        agent._memory_manager = MemoryManager()
+        agent.context_compressor = None
+
+        monkeypatch.setattr(model_tools, "get_tool_definitions", fake_get_tool_definitions)
+
+        GatewayRunner._refresh_cached_agent_tools(agent)
+
+        assert agent.valid_tool_names == {"terminal", "read_file", "hindsight_recall"}
+        assert [t["function"]["name"] for t in agent.tools] == [
+            "terminal",
+            "read_file",
+            "hindsight_recall",
+        ]
+
+
 class TestAgentConfigSignature:
     """Config signature produces stable, distinct keys."""
 
