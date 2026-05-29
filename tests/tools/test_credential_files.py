@@ -9,6 +9,7 @@ import pytest
 
 from tools.credential_files import (
     clear_credential_files,
+    default_cache_container_base,
     get_credential_file_mounts,
     get_cache_directory_mounts,
     get_skills_directory_mount,
@@ -397,11 +398,11 @@ class TestCacheDirectoryMounts:
         assert len(mounts) == 1
         assert mounts[0]["container_path"] == "/root/.hermes/cache/documents"
 
-    def test_legacy_dir_names_resolved(self, tmp_path, monkeypatch):
+    def test_legacy_dir_names_resolved_when_new_dirs_missing(self, tmp_path, monkeypatch):
         """Old-style dir names (e.g. document_cache) are resolved correctly."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
-        # Use legacy dir name — get_hermes_dir prefers old if it exists
+        # Use legacy dir names when the consolidated cache dirs do not exist.
         (hermes_home / "document_cache").mkdir()
         (hermes_home / "image_cache").mkdir()
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -414,6 +415,61 @@ class TestCacheDirectoryMounts:
         container_paths = {m["container_path"] for m in mounts}
         assert "/root/.hermes/cache/documents" in container_paths
         assert "/root/.hermes/cache/images" in container_paths
+
+    def test_consolidated_cache_dir_wins_over_legacy_dir(self, tmp_path, monkeypatch):
+        """cache/images must not be masked by a stale image_cache directory."""
+        hermes_home = tmp_path / ".hermes"
+        new_images = hermes_home / "cache" / "images"
+        old_images = hermes_home / "image_cache"
+        new_images.mkdir(parents=True)
+        old_images.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        mounts = get_cache_directory_mounts()
+
+        image_mounts = [
+            m for m in mounts
+            if m["container_path"] == "/root/.hermes/cache/images"
+        ]
+        assert len(image_mounts) == 1
+        assert image_mounts[0]["host_path"] == str(new_images)
+
+    def test_cache_mount_uses_host_visible_home_for_nested_docker(self, tmp_path, monkeypatch):
+        container_home = tmp_path / "container" / ".hermes"
+        host_home = tmp_path / "host" / ".hermes"
+        (container_home / "cache" / "images").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(container_home))
+        monkeypatch.setenv("HERMES_HOST_HOME", str(host_home))
+
+        mounts = get_cache_directory_mounts()
+
+        assert mounts == [{
+            "host_path": str(host_home / "cache" / "images"),
+            "container_path": "/root/.hermes/cache/images",
+        }]
+
+    def test_host_user_docker_cache_base_is_workspace_shared(self, monkeypatch):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "true")
+
+        assert default_cache_container_base() == "/workspace/shared/.hermes"
+
+    def test_host_user_cache_base_falls_back_to_config(self, tmp_path, monkeypatch):
+        import yaml
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump({
+            "terminal": {
+                "backend": "docker",
+                "docker_run_as_host_user": True,
+            }
+        }))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.delenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", raising=False)
+
+        assert default_cache_container_base() == "/workspace/shared/.hermes"
 
     def test_empty_hermes_home(self, tmp_path, monkeypatch):
         """No cache dirs → empty list."""

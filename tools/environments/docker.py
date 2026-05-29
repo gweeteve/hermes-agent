@@ -440,7 +440,10 @@ class DockerEnvironment(BaseEnvironment):
             # screenshots) so the agent can access uploaded files and other
             # cached media from inside the container.  Read-only — the
             # container reads these but the host gateway manages writes.
-            for cache_mount in get_cache_directory_mounts():
+            cache_container_base = (
+                "/workspace/shared/.hermes" if run_as_host_user else "/root/.hermes"
+            )
+            for cache_mount in get_cache_directory_mounts(container_base=cache_container_base):
                 volume_args.extend([
                     "-v",
                     f"{cache_mount['host_path']}:{cache_mount['container_path']}:ro",

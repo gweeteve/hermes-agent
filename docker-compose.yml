@@ -65,6 +65,7 @@ services:
       - TZ=${TZ:-Europe/Paris}
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
+      - HERMES_HOST_HOME=${HERMES_HOST_HOME:-${HOME}/.hermes}
       - HERMES_KANBAN_POSTGRES_DSN=${HERMES_KANBAN_POSTGRES_DSN:-postgresql://hermes_kanban:hermes_kanban@127.0.0.1:55432/hermes_kanban}
       - JUDY_DOCKER_HOST=unix:///var/run/judy-docker/docker.sock
       # To expose the OpenAI-compatible API server beyond localhost,
@@ -104,6 +105,7 @@ services:
       - TZ=${TZ:-Europe/Paris}
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
+      - HERMES_HOST_HOME=${HERMES_HOST_HOME:-${HOME}/.hermes}
       - HERMES_KANBAN_POSTGRES_DSN=${HERMES_KANBAN_POSTGRES_DSN:-postgresql://hermes_kanban:hermes_kanban@127.0.0.1:55432/hermes_kanban}
     # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
     command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
